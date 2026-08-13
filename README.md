@@ -49,10 +49,13 @@ for markdown rendering). You can read all of it in an afternoon.
 - Optional **read-only** mode (forces write/delete to deny) and a JSON-lines
   **audit log**.
 - **Markdown rendering** of answers via `rich` (code blocks with syntax
-  highlighting, tables, lists), streamed live as the model writes.
+  highlighting, tables, lists). While a reply streams you see a live tail of
+  the last few lines; each finished piece is printed in full and scrolls into
+  scrollback, so a long answer never gets stuck behind a screen-sized window.
 - **Reasoning display** you control: thinking streams live and then vanishes
   when the answer begins (`peek`), or stays in scrollback (`show`), or is
-  hidden (`hide`). `/think` reprints the last turn's reasoning on demand.
+  hidden behind a spinner (`hide`). `/think` reprints the last turn's
+  reasoning on demand, whichever mode you were in.
 - **Context management**: every token of history is re-sent (and re-billed) on
   every turn, so long sessions get expensive well before they hit the model's
   limit. lindwyrm tracks the token count the API actually reports and, once the
@@ -122,6 +125,10 @@ When the agent wants to write, delete, or run a command, you'll see a prompt:
 ```
 
 `always` grants that operation for the rest of the current user turn only.
+
+**Ctrl+C** stops whatever is running and clears the line you were typing, the
+way a shell does; press it twice in a row, or use **Ctrl+D** or `/exit`, to
+leave.
 
 ## Project instructions
 

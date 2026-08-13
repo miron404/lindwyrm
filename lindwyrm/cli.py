@@ -208,6 +208,12 @@ def make_tool_result_printer(renderer: Renderer):
     out = renderer.console if (renderer.enabled and renderer.console) else None
 
     def on_tool_result(name: str, result: str, is_error: bool) -> None:
+        _print_tool_result(name, result, is_error)
+        # Only now: the next model call is starting, and a spinner opened
+        # before this printed would have been painted over.
+        renderer.after_tool_result()
+
+    def _print_tool_result(name: str, result: str, is_error: bool) -> None:
         tag = "error" if is_error else "ok"
         color = "red" if is_error else "green"
         lines = result.splitlines() if result else []
@@ -311,12 +317,25 @@ def run_repl(cfg: Config) -> None:
         thinking_mode=cfg.thinking_display,
         enabled=cfg.markdown,
     )
+    interrupted_once = False
     while True:
         try:
             line = input(PROMPT).strip()
-        except (EOFError, KeyboardInterrupt):
+            interrupted_once = False
+        except EOFError:
+            # Ctrl+D is the deliberate way out.
             print("\nbye")
             return
+        except KeyboardInterrupt:
+            # Ctrl+C abandons the line being typed, the way a shell does --
+            # it is also what stops a running turn, and quitting the whole
+            # session on it is far too easy to do by accident.
+            if interrupted_once:
+                print(f"\n{DIM}bye{RESET}")
+                return
+            interrupted_once = True
+            print(f"\n{DIM}(^C again to quit, or Ctrl+D / /exit){RESET}")
+            continue
         if not line:
             continue
         if line.startswith("/"):
