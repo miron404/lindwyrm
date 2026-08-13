@@ -44,8 +44,11 @@ TAIL_LINES = 8
 # paragraph doesn't sit invisible while it is being written.
 MAX_PENDING_LINES = 12
 
-# Live repaint rate. Higher looks smoother and fights scrollback harder.
-REFRESH_HZ = 5
+# Live repaint rate, for the reasoning preview and the spinner. Every repaint
+# drags a scrolled-back terminal to the bottom, so this trades scrollability
+# for smoothness. It only applies while one of those two is on screen -- the
+# answer itself is printed, not redrawn, so it is unaffected either way.
+REFRESH_HZ = 10
 
 
 class Renderer:
