@@ -69,6 +69,7 @@ class StreamHandler:
         # Real token counts reported by the API, used for context tracking.
         self.input_tokens: int = 0
         self.output_tokens: int = 0
+        self.cache_read_tokens: int = 0
         self._blocks: dict[int, dict] = {}
 
     def feed(self, event_type: str, data: dict) -> Iterator[tuple[str, str]]:
@@ -81,6 +82,7 @@ class StreamHandler:
                 + int(usage.get("cache_read_input_tokens", 0))
                 + int(usage.get("cache_creation_input_tokens", 0))
             )
+            self.cache_read_tokens = int(usage.get("cache_read_input_tokens", 0))
             self.output_tokens = int(usage.get("output_tokens", 0))
         elif event_type == "content_block_start":
             idx = data["index"]

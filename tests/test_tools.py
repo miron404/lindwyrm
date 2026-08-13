@@ -130,6 +130,19 @@ class TestGrep(ToolTestCase):
         self.write("a.py", "nothing here\n")
         self.assertEqual(tool_grep(self.cfg, "ZZZ"), "(no matches)")
 
+    def test_path_may_be_a_single_file(self):
+        """This used to answer '(no matches)' for a file full of matches --
+        rglob on a file yields nothing -- and the model believed it."""
+        self.write("a.py", "NEEDLE here\n")
+        self.write("b.py", "NEEDLE there\n")
+        out = tool_grep(self.cfg, "NEEDLE", path="a.py")
+        self.assertIn("a.py:1:", out)
+        self.assertNotIn("b.py", out)
+
+    def test_missing_needle_in_a_single_file_still_reports_no_matches(self):
+        self.write("a.py", "nothing\n")
+        self.assertEqual(tool_grep(self.cfg, "ZZZ", path="a.py"), "(no matches)")
+
     def test_glob_filter(self):
         self.write("a.py", "NEEDLE\n")
         self.write("b.txt", "NEEDLE\n")
@@ -149,6 +162,13 @@ class TestGlob(ToolTestCase):
 
     def test_no_matches_message(self):
         self.assertEqual(tool_glob(self.cfg, "**/*.zzz"), "(no matches)")
+
+    def test_a_file_as_base_is_an_explicit_error(self):
+        """Silently returning nothing would read as 'no such files exist'."""
+        self.write("a.py", "x")
+        with self.assertRaises(SandboxError) as ctx:
+            tool_glob(self.cfg, "*", path="a.py")
+        self.assertIn("not a directory", str(ctx.exception))
 
 
 class TestBinarySniff(ToolTestCase):

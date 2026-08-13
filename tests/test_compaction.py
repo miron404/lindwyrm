@@ -130,6 +130,13 @@ class TestCompact(unittest.TestCase):
             context_limit: int = 1000
             auto_compact: bool = True
             compact_threshold: float = 0.75
+            # 1 token: the protected zone is then driven purely by
+            # compact_keep_last, which keeps these tests deterministic
+            # regardless of how long the fake messages happen to be.
+            compact_keep_tokens: int = 1
+            offload: bool = False
+            offload_threshold_tokens: int = 1000
+            offload_eager_tokens: int = 8000
             format: str = "anthropic"
             thinking: bool = True
             audit_log: object = None

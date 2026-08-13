@@ -25,7 +25,8 @@ Slash commands inside the REPL:
     /policy                     show current permissions
     /proxy                      show the proxy in use for this preset
     /context                    show how full the context window is
-    /compact                    summarize older history away right now
+    /compact [instructions]     compact now; optional focus, e.g.
+                                /compact keep the API decisions, drop debugging
     /clear                      clear conversation history
     /help                       show this help
     /exit, /quit                leave
@@ -40,6 +41,7 @@ from pathlib import Path
 from .agent import Agent
 from .config import Config, load_config, mask_proxy, parse_proxy
 from .http import APIError, close_client
+from .offload import get_store
 from .render import Renderer, _HAS_RICH
 from .sandbox import UserQuit, reset_session_grants
 
@@ -135,6 +137,14 @@ def _print_context(cfg: Config, agent) -> None:
     print(f"{BOLD}Context{RESET}")
     print(f"  {color}{bar}{RESET} {pct:.0f}%  ({used:,} / {limit:,} tokens, {measured})")
     print(f"  messages: {len(agent.messages)}   output so far: {agent.total_output_tokens:,} tokens")
+    if agent.total_cache_read_tokens:
+        # Worth surfacing: a sudden drop means something upstream of the
+        # history changed and broke the cacheable prefix.
+        print(f"  {DIM}served from cache: {agent.total_cache_read_tokens:,} input tokens{RESET}")
+    store = get_store()
+    if len(store):
+        print(f"  {DIM}offloaded: {len(store)} result(s), "
+              f"{store.total_chars() / 1024:.0f} KB on disk{RESET}")
     if cfg.auto_compact:
         print(f"  {DIM}auto-compacts at {cfg.compact_threshold * 100:.0f}%{RESET}")
     else:
@@ -378,8 +388,13 @@ def _handle_command(line: str, cfg: Config, agent: Agent, renderer: Renderer) ->
     elif cmd == "/context":
         _print_context(cfg, agent)
     elif cmd == "/compact":
+        focus = line.split(None, 1)[1].strip() if len(parts) > 1 else ""
+        moved, freed = agent.microcompact()
+        if moved:
+            print(f"  {GREEN}offloaded {moved} large tool result(s), "
+                  f"~{freed} tokens freed{RESET}")
         print(f"  {DIM}summarizing older history…{RESET}")
-        ok, note = agent.compact(on_retry=_make_retry_printer())
+        ok, note = agent.compact(focus=focus, on_retry=_make_retry_printer())
         print(f"  {GREEN if ok else YELLOW}{note}{RESET}")
         _print_context(cfg, agent)
     elif cmd == "/clear":

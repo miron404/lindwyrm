@@ -250,6 +250,7 @@ class TestCompactionOverHttp(ProviderTestCase):
         self.cfg.context_limit = 1000
         self.cfg.compact_threshold = 0.5
         self.cfg.compact_keep_last = 2
+        self.cfg.compact_keep_tokens = 1  # zone driven by message count here
 
         agent = Agent(self.cfg)
         agent.messages = [
@@ -280,6 +281,7 @@ class TestCompactionOverHttp(ProviderTestCase):
         self.cfg.context_limit = 1000
         self.cfg.compact_threshold = 0.5
         self.cfg.compact_keep_last = 2
+        self.cfg.compact_keep_tokens = 1  # zone driven by message count here
         agent = Agent(self.cfg)
         agent.messages = [
             {"role": "user", "content": [{"type": "text", "text": "q1"}]},

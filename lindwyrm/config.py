@@ -377,7 +377,18 @@ class Config:
     context_limit: int = 128_000
     auto_compact: bool = True
     compact_threshold: float = 0.75
-    compact_keep_last: int = 4  # recent messages kept verbatim when compacting
+    compact_keep_last: int = 4  # floor on messages kept verbatim
+    # Protected zone, in tokens. A message count alone is a poor measure:
+    # four messages can be forty tokens or half the window depending on
+    # whether a test run landed in them.
+    compact_keep_tokens: int = 8_000
+
+    # Offloading: move bulky tool results to disk and leave a stub the model
+    # can expand with read_offloaded. Reversible, unlike summarizing, so it
+    # runs first when context gets tight.
+    offload: bool = True
+    offload_threshold_tokens: int = 1_000   # worth moving once out of the zone
+    offload_eager_tokens: int = 8_000       # so big it goes the moment it appears
 
     preset_name: str = DEFAULT_PRESET
     presets: dict = field(default_factory=dict)  # name -> Preset, for switching
@@ -542,6 +553,10 @@ def load_config(
         auto_compact=bool(data.get("auto_compact", True)),
         compact_threshold=float(data.get("compact_threshold", 0.75)),
         compact_keep_last=max(0, int(data.get("compact_keep_last", 4))),
+        compact_keep_tokens=max(0, int(data.get("compact_keep_tokens", 8_000))),
+        offload=bool(data.get("offload", True)),
+        offload_threshold_tokens=max(1, int(data.get("offload_threshold_tokens", 1_000))),
+        offload_eager_tokens=max(1, int(data.get("offload_eager_tokens", 8_000))),
         preset_name=preset.name,
         presets=presets,
         extra_body=dict(preset.extra_body),

@@ -153,6 +153,7 @@ class OpenAIStreamHandler:
         # asks the provider to send. Left at 0 by providers that ignore it.
         self.input_tokens: int = 0
         self.output_tokens: int = 0
+        self.cache_read_tokens: int = 0
         self._text = ""
         self._tool_calls: dict[int, dict] = {}  # index -> {id, name, args}
 
@@ -163,6 +164,9 @@ class OpenAIStreamHandler:
         if usage:
             self.input_tokens = int(usage.get("prompt_tokens", 0))
             self.output_tokens = int(usage.get("completion_tokens", 0))
+            # Non-standard but widely mirrored from OpenAI's own shape.
+            details = usage.get("prompt_tokens_details") or {}
+            self.cache_read_tokens = int(details.get("cached_tokens", 0))
 
         choices = data.get("choices") or []
         if not choices:

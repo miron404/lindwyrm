@@ -17,6 +17,7 @@ import subprocess
 from pathlib import Path
 
 from .config import Config
+from .offload import get_store
 from .sandbox import (
     SandboxError,
     UserQuit,
@@ -162,6 +163,24 @@ TOOL_SCHEMAS = [
         },
     },
     {
+        "name": "read_offloaded",
+        "description": (
+            "Retrieve a tool result that was moved out of the conversation to "
+            "save context. Use the ref from an [offloaded: ...] marker. This "
+            "returns a SNAPSHOT taken when the original tool ran -- if you "
+            "want a file's current contents instead, use read_file."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ref": {"type": "string", "description": "The ref, e.g. 'off_0003'."},
+                "start_line": {"type": "integer", "description": "Optional 1-based start line."},
+                "end_line": {"type": "integer", "description": "Optional 1-based end line (inclusive)."},
+            },
+            "required": ["ref"],
+        },
+    },
+    {
         "name": "bash",
         "description": (
             "Run a shell command in the project root and return its combined "
@@ -299,6 +318,12 @@ def tool_list_dir(cfg: Config, path: str | None = None) -> str:
 def tool_glob(cfg: Config, pattern: str, path: str | None = None) -> str:
     raw = path or str(cfg.project_root)
     base = authorize(cfg, "read", raw, f"glob {pattern} in {_reld(cfg, raw)}")
+    if base.is_file():
+        raise SandboxError(
+            f"{_rel(cfg, base)} is a file, not a directory. glob searches "
+            f"inside a directory -- pass the containing folder, or use grep "
+            f"to search this file's contents."
+        )
     matches = sorted(
         str(p.relative_to(base))
         for p in base.glob(pattern)
@@ -319,7 +344,15 @@ def tool_grep(cfg: Config, pattern: str, path: str | None = None, glob: str | No
     except re.error:
         rx = re.compile(re.escape(pattern))
     results = []
-    files = base.rglob(glob) if glob else base.rglob("*")
+    if base.is_file():
+        # A file here used to yield nothing at all, because rglob on a file is
+        # empty -- so grep answered "(no matches)" for a file full of matches.
+        # A confident wrong answer is worse than an error: the model believes
+        # it and goes looking somewhere else.
+        files = [base]
+        base = base.parent
+    else:
+        files = base.rglob(glob) if glob else base.rglob("*")
     for f in files:
         if not f.is_file() or _is_skipped(f, base):
             continue
@@ -348,6 +381,18 @@ def tool_delete_file(cfg: Config, path: str) -> str:
     target = authorize(cfg, "delete", path, f"DELETE {_rel(cfg, resolved)}")
     target.unlink()
     return f"Deleted {_rel(cfg, target)}"
+
+
+def tool_read_offloaded(cfg: Config, ref: str, start_line: int | None = None,
+                        end_line: int | None = None) -> str:
+    """Read back offloaded content. Not path-scoped: this is lindwyrm's own
+    session data, addressed by ref, not a file the user asked us to guard."""
+    try:
+        return get_store().get(ref, start_line, end_line)
+    except KeyError as e:
+        raise SandboxError(str(e)) from None
+    except OSError as e:
+        raise SandboxError(f"Could not read offloaded content: {e}") from None
 
 
 def _kill_process_tree(proc: subprocess.Popen) -> None:
@@ -421,6 +466,7 @@ TOOL_FUNCS = {
     "glob": tool_glob,
     "grep": tool_grep,
     "delete_file": tool_delete_file,
+    "read_offloaded": tool_read_offloaded,
     "bash": tool_bash,
 }
 

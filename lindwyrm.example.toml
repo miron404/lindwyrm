@@ -30,8 +30,21 @@ default_preset = "flash"
 # older history is replaced by a model-written summary and work continues.
 # auto_compact = true
 # compact_threshold = 0.75   # fraction of context_limit that triggers it
-# compact_keep_last = 4      # recent messages kept verbatim, never summarized
+# compact_keep_last = 4      # floor on recent messages kept verbatim
+# compact_keep_tokens = 8000 # protected zone, in TOKENS -- four messages can be
+#                            # forty tokens or half the window depending on
+#                            # whether a test run landed in them. Capped at a
+#                            # quarter of context_limit so a small window still
+#                            # leaves something to compact.
 # context_limit = 128000     # your model's window; also settable per-preset
+
+# Before summarizing, bulky tool results are moved to disk and replaced with a
+# short stub the model can expand via read_offloaded. Cheaper than a summary
+# and reversible -- a snapshot stays on disk, so nothing is lost even if the
+# file is edited or deleted afterwards.
+# offload = true
+# offload_threshold_tokens = 1000  # move results this big once they age out
+# offload_eager_tokens = 8000      # move immediately: too big to sit in context
 
 # Retries for transient failures (429 / 5xx / connect timeouts), with
 # exponential backoff and jitter. Only applies before any output has streamed.

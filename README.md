@@ -49,8 +49,12 @@ for markdown rendering). You can read all of it in an afternoon.
 - **Context management**: every token of history is re-sent (and re-billed) on
   every turn, so long sessions get expensive well before they hit the model's
   limit. lindwyrm tracks the token count the API actually reports and, once the
-  window is 75% full, summarizes older history away and continues. `/context`
-  shows how full it is; `/compact` does it on demand.
+  window is 75% full, reclaims space in two stages. First it **offloads** bulky
+  tool results to disk, leaving a stub the model can expand with
+  `read_offloaded` — cheap and reversible. Only if that isn't enough does it
+  **summarize** older history, which is lossy. `/context` shows how full the
+  window is (and how much is being served from cache); `/compact [instructions]`
+  runs it on demand, optionally told what to keep.
 - **Retries**: 429s and 5xx are retried with exponential backoff and jitter
   (honoring `Retry-After`), so one blip doesn't kill a turn's work. A request
   is only retried if nothing has been streamed yet — never mid-answer.
@@ -182,8 +186,11 @@ proxy, so DNS is resolved on the proxy side either way.
   you confirm yourself.
 - Compaction is lossy by nature: it replaces older turns with a model-written
   summary. It cuts only at user-turn boundaries so tool calls are never split
-  from their results, but details outside the summary are gone. Use `/clear`
-  between unrelated tasks rather than relying on it.
+  from their results, but details outside the summary are gone. Offloading,
+  which runs first, is not lossy — the full text stays on disk under
+  `~/.local/share/lindwyrm/offload/` and is swept after 7 days. Note that an
+  offloaded result is a *snapshot*: the file may have changed since, which is
+  exactly why it is copied rather than re-read on demand.
 
 ## Tests
 
