@@ -1,20 +1,23 @@
 """Streaming terminal output.
 
-The constraint that shapes all of this: `rich.Live` paints a fixed region of
-the screen and cannot scroll. Feed it a renderable taller than the terminal
-and Rich crops it, leaving an ellipsis at the bottom -- so a long answer or a
-long stretch of reasoning appears to freeze, showing its first screenful
-while the real stream races ahead unseen. It only ever "unfreezes" when the
-region closes for a tool line or a confirmation prompt.
+`rich.Live` paints a fixed region and cannot scroll: give it more than a
+screenful and Rich crops it, and every repaint drags a scrolled-back terminal
+back to the bottom. So Live is used as little as possible.
 
-So nothing long-lived goes inside Live. The live region shows only a bounded
-TAIL of whatever is arriving, hard-wrapped so it can never outgrow the
-terminal. Completed pieces are printed to the console normally, which scrolls
-and lands in scrollback where it can be read back.
+The answer never goes through it. Answer text only ever grows at the end, so
+finished Markdown blocks are printed straight to the console: full width,
+scrolls like any other program's output, and readable in scrollback. A block
+ends at a blank line -- but never inside a fenced code block, which would
+render half a fence -- with a length cap so one long paragraph doesn't sit
+invisible while it is written.
+
+Live is left for the two things that genuinely have to disappear afterwards:
+the reasoning preview and the spinner. Both are bounded to a few rows, and
+both repaint slowly, because repainting is what fights scrollback.
 
 Thinking display modes:
-  "peek" - tail streams live, then disappears when the answer starts
-  "show" - tail streams live, and the whole thing is kept in scrollback
+  "peek" - a bounded tail streams live, then disappears when the answer starts
+  "show" - the same tail, and the whole thing is kept in scrollback
   "hide" - not displayed, but a spinner shows the model is working
 """
 
@@ -37,6 +40,13 @@ except ImportError:  # pragma: no cover
 # to read as movement rather than flicker.
 TAIL_LINES = 8
 
+# A block this long is released even without a blank line, so one very long
+# paragraph doesn't sit invisible while it is being written.
+MAX_PENDING_LINES = 12
+
+# Live repaint rate. Higher looks smoother and fights scrollback harder.
+REFRESH_HZ = 5
+
 
 class Renderer:
     """Stateful per-turn renderer. One instance per REPL session is fine;
@@ -47,9 +57,10 @@ class Renderer:
         self.enabled = enabled and _HAS_RICH
         self.console = Console() if _HAS_RICH else None
         # Per-turn accumulators.
-        self._text_buf = ""
+        self._pending = ""        # answer text not yet forming a whole block
         self._think_buf = ""
         self._segment_think = ""  # thinking since the last flush
+        self._spinner = None      # created once; a fresh one never animates
         self._live: "Live | None" = None
         self._live_kind: str | None = None  # "thinking" | "text" | "waiting"
         self._started = 0.0
@@ -58,11 +69,12 @@ class Renderer:
     # -- lifecycle ---------------------------------------------------------
 
     def begin_turn(self) -> None:
-        self._text_buf = ""
+        self._pending = ""
         self._think_buf = ""
         self._segment_think = ""
         self._live = None
         self._live_kind = None
+        self._spinner = None
         self._started = time.monotonic()
         self.wait()
 
@@ -85,7 +97,7 @@ class Renderer:
         if self._live_kind in ("text", "thinking"):
             return
         self._open_live("waiting")
-        self._live.update(self._status("working"))
+        self._live.update(self._get_spinner("working"))
 
     # -- internal ----------------------------------------------------------
 
@@ -96,9 +108,18 @@ class Renderer:
     def _status(self, label: str) -> "Text":
         return Text(f"  {label}… {self._elapsed()}", style="dim")
 
-    def _spinner(self, label: str):
-        return Spinner("dots", text=Text(f" {label}… {self._elapsed()}",
-                                         style="dim"), style="dim")
+    def _get_spinner(self, label: str):
+        """One Spinner for the whole wait.
+
+        Building a new one per update restarts its frame counter, so it sits
+        on frame zero forever and looks frozen -- which is worse than no
+        spinner at all, since a frozen spinner reads as a hung process.
+        """
+        if self._spinner is None:
+            self._spinner = Spinner("dots", style="dim")
+        self._spinner.update(text=Text(f" {label}… {self._elapsed()}",
+                                       style="dim"))
+        return self._spinner
 
     def _tail(self, text: str, lines: int = TAIL_LINES) -> str:
         """Last `lines` DISPLAY rows of `text`, hard-wrapped to the terminal.
@@ -128,19 +149,21 @@ class Renderer:
         self._close_live()
         # Always transient: the live region is scratch space. Anything worth
         # keeping is printed to the console separately.
+        # Every repaint yanks a scrolled-back terminal to the bottom, so this
+        # is as slow as it can be while the spinner still reads as motion.
         self._live = Live(console=self.console, transient=True,
-                          refresh_per_second=10, auto_refresh=True)
+                          refresh_per_second=REFRESH_HZ, auto_refresh=True)
         self._live.start()
         self._live_kind = kind
 
     def _flush_text(self) -> None:
-        """Print the finished answer segment into scrollback, as Markdown."""
-        if not self._text_buf:
+        """Print whatever answer text is still buffered."""
+        if not self._pending.strip():
+            self._pending = ""
             return
         if self.enabled and self.console is not None:
-            self._close_live()
-            self.console.print(Markdown(self._text_buf))
-        self._text_buf = ""
+            self._print_block(self._pending)
+        self._pending = ""
 
     def _flush_thinking(self) -> None:
         """In `show` mode, keep the reasoning segment in scrollback."""
@@ -167,7 +190,7 @@ class Renderer:
         if self.thinking_mode == "hide":
             # Content stays hidden, but the spinner proves it isn't wedged.
             self._open_live("waiting")
-            self._live.update(self._spinner("thinking"))
+            self._live.update(self._get_spinner("thinking"))
             return
 
         self._open_live("thinking")
@@ -183,9 +206,63 @@ class Renderer:
         if self._live_kind != "text":
             # The answer has started: reasoning is done with for this segment.
             self._flush_thinking()
-            self._open_live("text")
-        self._text_buf += chunk
-        self._live.update(Text(self._tail(self._text_buf)))
+            self._close_live()
+            self._live_kind = "text"
+        self._pending += chunk
+        self._emit_ready_blocks()
+
+    def _emit_ready_blocks(self) -> None:
+        """Print every complete Markdown block that has arrived.
+
+        The answer is append-only, so it does not belong in a Live region at
+        all: printing finished blocks straight to the console lets the
+        terminal scroll the way it does for any other program, at full width,
+        instead of trapping the text in a small window that only opens up at
+        the end.
+        """
+        while True:
+            block, rest = self._take_block(self._pending)
+            if block is None:
+                return
+            self._pending = rest
+            self._print_block(block)
+
+    def _take_block(self, buf: str) -> tuple[str | None, str]:
+        """Split off one renderable Markdown block, if the buffer holds one.
+
+        Blocks end at a blank line, but never inside a fenced code block --
+        splitting there would render half a fence. A long block is released
+        anyway so a single big paragraph doesn't sit invisible.
+        """
+        lines = buf.split("\n")
+        if len(lines) < 2:
+            return None, buf  # nothing but an unfinished line
+
+        in_fence = False
+        for i, line in enumerate(lines[:-1]):  # last piece is still partial
+            stripped = line.lstrip()
+            if stripped.startswith("```"):
+                if in_fence:
+                    return "\n".join(lines[:i + 1]), "\n".join(lines[i + 1:])
+                in_fence = True
+                continue
+            if in_fence:
+                continue
+            if not stripped and i > 0:
+                return "\n".join(lines[:i]), "\n".join(lines[i + 1:])
+
+        if not in_fence and len(lines) > MAX_PENDING_LINES:
+            keep = lines[-1]
+            return "\n".join(lines[:-1]), keep
+        return None, buf
+
+    def _print_block(self, block: str) -> None:
+        if not block.strip():
+            return
+        if self.console is not None:
+            self._close_live()
+            self.console.print(Markdown(block))
+            self._live_kind = "text"
 
     def on_tool(self, name: str, tool_input: dict) -> None:
         # Everything so far is final; print it before the tool line so the

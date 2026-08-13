@@ -49,9 +49,10 @@ for markdown rendering). You can read all of it in an afternoon.
 - Optional **read-only** mode (forces write/delete to deny) and a JSON-lines
   **audit log**.
 - **Markdown rendering** of answers via `rich` (code blocks with syntax
-  highlighting, tables, lists). While a reply streams you see a live tail of
-  the last few lines; each finished piece is printed in full and scrolls into
-  scrollback, so a long answer never gets stuck behind a screen-sized window.
+  highlighting, tables, lists). The answer is printed block by block as it
+  completes — full width, scrolling like any other program's output — rather
+  than being redrawn inside a fixed region, which cannot scroll and drags the
+  terminal back down on every repaint.
 - **Reasoning display** you control: thinking streams live and then vanishes
   when the answer begins (`peek`), or stays in scrollback (`show`), or is
   hidden behind a spinner (`hide`). `/think` reprints the last turn's

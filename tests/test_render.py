@@ -24,7 +24,9 @@ class RendererTestCase(unittest.TestCase):
                                         file=io.StringIO())
 
     def output(self) -> str:
-        return self.renderer.console.export_text()
+        # clear=False: the default empties the recording, so a second call in
+        # the same test would see nothing.
+        return self.renderer.console.export_text(clear=False)
 
 
 class TestTail(RendererTestCase):
@@ -153,13 +155,73 @@ class TestWaitingIndicator(RendererTestCase):
         self.assertEqual(self.renderer._live_kind, "text")
 
 
+class TestBlockStreaming(RendererTestCase):
+    """The answer is printed as it completes, not held in a window."""
+
+    def test_a_finished_paragraph_appears_before_the_turn_ends(self):
+        self.renderer.begin_turn()
+        self.renderer.on_text("first paragraph.\n\nstill writing")
+        # No end_turn yet: the finished paragraph must already be out.
+        self.assertIn("first paragraph", self.output())
+
+    def test_unfinished_text_is_not_printed_twice(self):
+        self.renderer.begin_turn()
+        self.renderer.on_text("hello world.\n\ntail")
+        self.renderer.end_turn()
+        self.assertEqual(self.output().count("hello world"), 1)
+        self.assertEqual(self.output().count("tail"), 1)
+
+    def test_a_code_fence_is_not_split_in_half(self):
+        """Blank lines inside a fence must not end the block, or the fence
+        renders as literal backticks."""
+        self.renderer.begin_turn()
+        self.renderer.on_text("```python\ndef a():\n\n    return 1\n```\n\n")
+        out = self.output()
+        self.assertNotIn("```", out)  # rendered, not shown raw
+        self.assertIn("def a()", out)
+
+    def test_a_long_paragraph_is_released_before_it_ends(self):
+        """Otherwise one long paragraph shows nothing until it finishes."""
+        self.renderer.begin_turn()
+        for i in range(40):
+            self.renderer.on_text(f"line {i}\n")
+        self.assertIn("line 0", self.output())
+
+    def test_text_does_not_use_a_live_region(self):
+        """Live cannot scroll and yanks the terminal down on every repaint."""
+        self.renderer.begin_turn()
+        self.renderer.on_text("some text.\n\n")
+        self.assertIsNone(self.renderer._live)
+
+
+class TestSpinner(RendererTestCase):
+    def test_the_same_spinner_object_is_reused(self):
+        """A fresh Spinner restarts at frame zero, so rebuilding it on every
+        update leaves it visibly frozen."""
+        self.renderer.begin_turn()
+        first = self.renderer._get_spinner("working")
+        second = self.renderer._get_spinner("thinking")
+        self.assertIs(first, second)
+
+    def test_spinner_is_reset_between_turns(self):
+        self.renderer.begin_turn()
+        first = self.renderer._get_spinner("working")
+        self.renderer.end_turn()
+        self.renderer.begin_turn()
+        self.assertIsNot(self.renderer._get_spinner("working"), first)
+
+
 class TestPlainFallback(unittest.TestCase):
     def test_disabled_renderer_does_not_need_rich(self):
+        import contextlib
+        import io
+
         renderer = Renderer(enabled=False)
-        renderer.begin_turn()
-        renderer.on_thinking("t")
-        renderer.on_text("x")
-        renderer.end_turn()
+        with contextlib.redirect_stdout(io.StringIO()):
+            renderer.begin_turn()
+            renderer.on_thinking("t")
+            renderer.on_text("x")
+            renderer.end_turn()
         self.assertIn("t", renderer.last_thinking)
 
 
