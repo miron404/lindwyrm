@@ -26,6 +26,16 @@ from .sandbox import (
 )
 
 MAX_READ_BYTES = 256 * 1024  # don't dump huge files into context blindly
+MAX_GREP_BYTES = 8 * 1024 * 1024  # skip files too big to be worth searching
+
+
+def _looks_binary(path: Path) -> bool:
+    """Cheap binary sniff: a NUL byte in the first 4 KiB."""
+    try:
+        with path.open("rb") as fh:
+            return b"\0" in fh.read(4096)
+    except OSError:
+        return True
 
 # Directories that are almost never what a search is looking for. Walking them
 # wastes time and floods the model's context with vendored or generated code.
@@ -88,16 +98,22 @@ TOOL_SCHEMAS = [
     {
         "name": "edit_file",
         "description": (
-            "Replace an exact substring in a file with new text. `old_text` "
-            "must appear EXACTLY once in the file. Prefer this over write_file "
-            "for small changes so you don't rewrite the whole file."
+            "Replace an exact substring in a file with new text. By default "
+            "`old_text` must appear EXACTLY once; if it appears several times "
+            "the error tells you which lines matched, so you can either add "
+            "surrounding context or set replace_all. Prefer this over "
+            "write_file for small changes so you don't rewrite the whole file."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "path": {"type": "string"},
-                "old_text": {"type": "string", "description": "Exact text to replace (must be unique)."},
+                "old_text": {"type": "string", "description": "Exact text to replace."},
                 "new_text": {"type": "string", "description": "Replacement text."},
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "Replace every occurrence instead of requiring a unique match.",
+                },
             },
             "required": ["path", "old_text", "new_text"],
         },
@@ -213,7 +229,18 @@ def tool_write_file(cfg: Config, path: str, content: str) -> str:
     return f"Wrote {len(content)} chars to {_rel(cfg, target)}"
 
 
-def tool_edit_file(cfg: Config, path: str, old_text: str, new_text: str) -> str:
+def _match_lines(text: str, needle: str) -> list[int]:
+    """1-based line numbers where each occurrence of `needle` starts."""
+    lines = []
+    start = 0
+    while (idx := text.find(needle, start)) != -1:
+        lines.append(text.count("\n", 0, idx) + 1)
+        start = idx + max(1, len(needle))
+    return lines
+
+
+def tool_edit_file(cfg: Config, path: str, old_text: str, new_text: str,
+                   replace_all: bool = False) -> str:
     resolved = resolve_target(cfg, path)
     if not resolved.is_file():
         raise SandboxError(f"Not a file: {resolved}")
@@ -221,13 +248,29 @@ def tool_edit_file(cfg: Config, path: str, old_text: str, new_text: str) -> str:
     count = original.count(old_text)
     if count == 0:
         raise SandboxError("old_text not found in file.")
-    if count > 1:
-        raise SandboxError(f"old_text appears {count} times; it must be unique. Add more context.")
-    updated = original.replace(old_text, new_text, 1)
+    if count > 1 and not replace_all:
+        # Point at every match so the next attempt can add the right context
+        # instead of guessing -- repeated boilerplate is where this used to
+        # stall, with nothing to go on but "it must be unique".
+        where = ", ".join(f"line {n}" for n in _match_lines(original, old_text)[:10])
+        raise SandboxError(
+            f"old_text appears {count} times ({where}). Either extend it with "
+            f"surrounding context so it matches exactly once, or pass "
+            f"replace_all=true to change every occurrence."
+        )
+
+    if replace_all:
+        updated = original.replace(old_text, new_text)
+        summary = f"edit {_rel(cfg, resolved)} ({count} occurrence(s))"
+    else:
+        updated = original.replace(old_text, new_text, 1)
+        summary = f"edit {_rel(cfg, resolved)}"
+
     diff_preview = _mini_diff(old_text, new_text)
-    target = authorize(cfg, "write", path, f"edit {_rel(cfg, resolved)}", preview=diff_preview)
+    target = authorize(cfg, "write", path, summary, preview=diff_preview)
     target.write_text(updated, encoding="utf-8")
-    return f"Edited {_rel(cfg, target)}"
+    return (f"Edited {_rel(cfg, target)}"
+            + (f" ({count} occurrences replaced)" if replace_all else ""))
 
 
 def _mini_diff(old: str, new: str) -> str:
@@ -281,11 +324,16 @@ def tool_grep(cfg: Config, pattern: str, path: str | None = None, glob: str | No
         if not f.is_file() or _is_skipped(f, base):
             continue
         try:
-            for i, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-                if rx.search(line):
-                    results.append(f"{f.relative_to(base)}:{i}: {line.strip()[:200]}")
-                    if len(results) >= 300:
-                        return "\n".join(results) + "\n... (truncated)"
+            if f.stat().st_size > MAX_GREP_BYTES or _looks_binary(f):
+                continue
+            # Streamed line by line: reading whole files in was fine for source
+            # but pulls a multi-hundred-megabyte log entirely into memory.
+            with f.open("r", encoding="utf-8", errors="replace") as fh:
+                for i, line in enumerate(fh, 1):
+                    if rx.search(line):
+                        results.append(f"{f.relative_to(base)}:{i}: {line.strip()[:200]}")
+                        if len(results) >= 300:
+                            return "\n".join(results) + "\n... (truncated)"
         except OSError:
             continue
     return "\n".join(results) if results else "(no matches)"

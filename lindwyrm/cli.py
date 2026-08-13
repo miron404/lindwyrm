@@ -321,8 +321,9 @@ def _handle_command(line: str, cfg: Config, agent: Agent, renderer: Renderer) ->
             print(f"current: {cfg.preset_name} ({cfg.format}, {cfg.model})")
         else:
             try:
-                _switch_preset(cfg, parts[1])
-                print(f"-> {cfg.preset_name} ({cfg.format}, {cfg.model})")
+                _switch_preset(cfg, parts[1], agent)
+                print(f"-> {cfg.preset_name} ({cfg.format}, {cfg.model}, "
+                      f"context {cfg.context_limit:,})")
             except SystemExit as e:
                 print(f"  {RED}error:{RESET} {e}")
     elif cmd == "/presets":
@@ -429,14 +430,27 @@ def _perm_command(cfg: Config, args: list[str]) -> None:
     print(f"  rule set (this session): {_rel_display(cfg, target)} -> {summary}")
 
 
-def _switch_preset(cfg: Config, name: str) -> None:
+# Every Config field a preset can carry. Kept next to Preset itself in spirit:
+# forgetting one here means /model silently keeps the old provider's value.
+PRESET_FIELDS = (
+    "preset_name", "format", "base_url", "model", "api_key",
+    "thinking", "max_tokens", "thinking_budget", "temperature",
+    "context_limit", "max_completion_tokens", "extra_body",
+)
+
+
+def _switch_preset(cfg: Config, name: str, agent: Agent | None = None) -> None:
     """Switch cfg to a different preset IN PLACE (cfg is shared by reference
     across the REPL, so we copy every field a preset switch can touch rather
     than replacing the object)."""
     new = cfg.with_model(name)  # may raise SystemExit if the key is missing
-    for f in ("preset_name", "format", "base_url", "model", "api_key",
-              "thinking", "max_tokens", "thinking_budget", "temperature", "extra_body"):
+    for f in PRESET_FIELDS:
         setattr(cfg, f, getattr(new, f))
+    if agent is not None:
+        # The recorded input size came from the previous provider's tokenizer
+        # and was measured against its context window. Keeping it would judge
+        # the new model's fullness with the old model's numbers.
+        agent.last_input_tokens = 0
 
 
 def _list_presets(cfg: Config) -> None:

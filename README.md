@@ -25,7 +25,9 @@ for markdown rendering). You can read all of it in an afternoon.
   there, and some providers reject unknown fields).
 - Tools: `read_file`, `write_file`, `edit_file`, `list_dir`, `glob`, `grep`,
   `delete_file`, `bash` -- work identically no matter which preset/provider
-  is active.
+  is active. `edit_file` requires a unique match by default and names the
+  lines that matched when it isn't unique, or takes `replace_all`. `grep`
+  streams files line by line and skips binaries and vendored directories.
 - **Path-based permissions**: every read/write/delete resolves to a level —
   `allow` (silent), `confirm` (ask first), or `deny` (blocked) — from a global
   default plus per-path rules. The most specific rule wins, so you can open a
