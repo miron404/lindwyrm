@@ -10,6 +10,7 @@ no matter how the model phrases its request.
 
 from __future__ import annotations
 
+import difflib
 import fnmatch
 import os
 import signal
@@ -28,6 +29,9 @@ from .sandbox import (
 
 MAX_READ_BYTES = 256 * 1024  # don't dump huge files into context blindly
 MAX_GREP_BYTES = 8 * 1024 * 1024  # skip files too big to be worth searching
+
+DIFF_CONTEXT = 3      # unchanged lines shown around each hunk
+MAX_DIFF_LINES = 60   # a full-file rewrite shouldn't bury the prompt
 
 
 def _looks_binary(path: Path) -> bool:
@@ -262,7 +266,20 @@ def tool_write_file(cfg: Config, path: str, content: str) -> str:
     resolved = resolve_target(cfg, path)
     exists = resolved.is_file()
     verb = "overwrite" if exists else "create"
-    preview = content if len(content) <= 800 else content[:800] + f"\n... ({len(content)} chars total)"
+
+    preview = None
+    if exists:
+        # Overwriting: what matters is what you are about to LOSE, which the
+        # new content alone doesn't show.
+        try:
+            if not _looks_binary(resolved) and resolved.stat().st_size <= MAX_READ_BYTES:
+                preview = _unified_diff(
+                    resolved.read_text(encoding="utf-8", errors="replace"),
+                    content, _rel(cfg, resolved))
+        except OSError:
+            preview = None
+    if preview is None:
+        preview = content if len(content) <= 800 else content[:800] + f"\n... ({len(content)} chars total)"
     target = authorize(cfg, "write", path,
                        f"{verb} {_rel(cfg, resolved)} ({len(content)} chars)", preview=preview)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -307,20 +324,35 @@ def tool_edit_file(cfg: Config, path: str, old_text: str, new_text: str,
         updated = original.replace(old_text, new_text, 1)
         summary = f"edit {_rel(cfg, resolved)}"
 
-    diff_preview = _mini_diff(old_text, new_text)
+    diff_preview = _unified_diff(original, updated, _rel(cfg, resolved))
     target = authorize(cfg, "write", path, summary, preview=diff_preview)
     target.write_text(updated, encoding="utf-8")
     return (f"Edited {_rel(cfg, target)}"
             + (f" ({count} occurrences replaced)" if replace_all else ""))
 
 
-def _mini_diff(old: str, new: str) -> str:
-    out = []
-    for line in old.splitlines():
-        out.append(f"- {line}")
-    for line in new.splitlines():
-        out.append(f"+ {line}")
-    return "\n".join(out)
+def _unified_diff(old: str, new: str, label: str) -> str:
+    """A real diff of the whole file, for the confirmation prompt.
+
+    The old preview listed every removed line and then every added line, so a
+    two-line change inside a twenty-line block printed forty lines with
+    nothing marking what actually differed -- unreadable exactly when you
+    need to decide quickly. Unified format shows only the changed hunks, with
+    context and line numbers.
+    """
+    old_lines = old.splitlines(keepends=True)
+    new_lines = new.splitlines(keepends=True)
+    diff = list(difflib.unified_diff(old_lines, new_lines, n=DIFF_CONTEXT))
+    if not diff:
+        return "(no textual change)"
+
+    body = [line.rstrip("\n") for line in diff[2:]]  # drop the ---/+++ header
+    added = sum(1 for line in body if line.startswith("+"))
+    removed = sum(1 for line in body if line.startswith("-"))
+    if len(body) > MAX_DIFF_LINES:
+        hidden = len(body) - MAX_DIFF_LINES
+        body = body[:MAX_DIFF_LINES] + [f"... ({hidden} more diff lines)"]
+    return "\n".join([f"{label}: +{added} -{removed}", *body])
 
 
 def tool_list_dir(cfg: Config, path: str | None = None) -> str:

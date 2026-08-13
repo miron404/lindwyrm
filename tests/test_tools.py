@@ -9,11 +9,14 @@ from pathlib import Path
 from lindwyrm.config import Policy
 from lindwyrm.sandbox import SandboxError
 from lindwyrm.tools import (
+    MAX_DIFF_LINES,
     _looks_binary,
     _match_lines,
+    _unified_diff,
     tool_delete_file,
     tool_edit_file,
     tool_glob,
+    tool_write_file,
     tool_grep,
     tool_list_dir,
     tool_read_file,
@@ -97,6 +100,91 @@ class TestEditFile(ToolTestCase):
         (self.root / "sub").mkdir()
         with self.assertRaises(SandboxError):
             tool_edit_file(self.cfg, "sub", "a", "b")
+
+
+class TestUnifiedDiff(unittest.TestCase):
+    """The confirmation prompt is where you decide yes or no in a second or
+    two, so the diff has to show what changed, not restate the whole block."""
+
+    def setUp(self):
+        self.old = "\n".join(f"line {i}" for i in range(1, 21))
+        self.new = self.old.replace("line 8", "line EIGHT")
+
+    def test_only_the_changed_hunk_is_shown(self):
+        out = _unified_diff(self.old, self.new, "a.py")
+        self.assertIn("-line 8", out)
+        self.assertIn("+line EIGHT", out)
+        # Untouched lines far from the change stay out of it.
+        self.assertNotIn("line 1\n", out)
+        self.assertNotIn("line 20", out)
+
+    def test_it_is_far_shorter_than_listing_both_versions(self):
+        out = _unified_diff(self.old, self.new, "a.py")
+        self.assertLess(len(out.splitlines()), 20)
+
+    def test_context_lines_surround_the_change(self):
+        out = _unified_diff(self.old, self.new, "a.py")
+        self.assertIn(" line 7", out)
+        self.assertIn(" line 9", out)
+
+    def test_counts_are_summarised(self):
+        self.assertIn("+1 -1", _unified_diff(self.old, self.new, "a.py"))
+
+    def test_hunk_headers_carry_line_numbers(self):
+        self.assertIn("@@", _unified_diff(self.old, self.new, "a.py"))
+
+    def test_identical_content_says_so(self):
+        self.assertIn("no textual change", _unified_diff("x", "x", "a.py"))
+
+    def test_a_whole_file_rewrite_is_truncated(self):
+        old = "\n".join(f"old {i}" for i in range(200))
+        new = "\n".join(f"new {i}" for i in range(200))
+        out = _unified_diff(old, new, "big.py")
+        self.assertLessEqual(len(out.splitlines()), MAX_DIFF_LINES + 3)
+        self.assertIn("more diff lines", out)
+
+    def test_creating_content_from_nothing(self):
+        out = _unified_diff("", "hello\n", "new.py")
+        self.assertIn("+hello", out)
+
+
+class TestWritePreview(ToolTestCase):
+    def test_overwriting_an_existing_file_previews_a_diff(self):
+        """The new content alone doesn't show what is about to be lost."""
+        self.write("a.py", "keep = 1\ndrop = 2\n")
+        seen = {}
+
+        import lindwyrm.tools as tools
+        original = tools.authorize
+
+        def spy(cfg, op, path, summary, preview=None):
+            seen["preview"] = preview
+            return original(cfg, op, path, summary, preview=preview)
+
+        tools.authorize = spy
+        try:
+            tool_write_file(self.cfg, "a.py", "keep = 1\nadded = 3\n")
+        finally:
+            tools.authorize = original
+
+        self.assertIn("-drop = 2", seen["preview"])
+        self.assertIn("+added = 3", seen["preview"])
+
+    def test_creating_a_new_file_previews_its_content(self):
+        seen = {}
+        import lindwyrm.tools as tools
+        original = tools.authorize
+
+        def spy(cfg, op, path, summary, preview=None):
+            seen["preview"] = preview
+            return original(cfg, op, path, summary, preview=preview)
+
+        tools.authorize = spy
+        try:
+            tool_write_file(self.cfg, "brand_new.py", "print('hi')\n")
+        finally:
+            tools.authorize = original
+        self.assertIn("print('hi')", seen["preview"])
 
 
 class TestGrep(ToolTestCase):

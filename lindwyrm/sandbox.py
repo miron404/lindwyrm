@@ -57,6 +57,21 @@ def reset_session_grants() -> None:
     _session_grants.clear()
 
 
+def _colorize_preview(line: str) -> str:
+    """Tint a diff line so the change is visible at a glance.
+
+    The prompt is where you decide yes or no, usually in a second or two --
+    a wall of uniformly dim text makes that harder than it needs to be.
+    """
+    if line.startswith("+"):
+        return f"\033[32m{line}"      # added
+    if line.startswith("-"):
+        return f"\033[31m{line}"      # removed
+    if line.startswith("@@"):
+        return f"\033[36m{line}"      # hunk header
+    return f"\033[2m{line}"           # context, dim
+
+
 def _ask(prompt: str) -> str:
     try:
         return input(prompt).strip().lower()
@@ -94,7 +109,7 @@ def authorize(
     print(f"  \033[1;33m{op.upper()} requested:\033[0m {summary}")
     if preview:
         for line in preview.splitlines():
-            print(f"    \033[2m{line}\033[0m")
+            print(f"    {_colorize_preview(line)}\033[0m")
     ans = _ask(f"  Allow? [y]es / [n]o / [a]lways ({op}) / [q]uit: ")
     if ans in ("y", "yes"):
         return target
