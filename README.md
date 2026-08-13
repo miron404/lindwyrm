@@ -150,15 +150,15 @@ ruff check .                           # lint
 
 ## Gotchas
 - `packaging/lwyrm/` version is stamped by CI; don't hand-edit it
-```
 
-Rules of thumb: write down anything you catch yourself repeating in chat, and
+
+- Rules of thumb: write down anything you catch yourself repeating in chat, and
 leave out anything the agent can discover in two seconds by looking. Commands
 belong here verbatim so they aren't guessed. So do decisions it cannot infer
 from the code — "we chose X over Y because Z" stops it from helpfully
 reintroducing Y.
 
-`LINDWYRM.md` takes precedence if you want notes specific to this agent, and
+- `LINDWYRM.md` takes precedence if you want notes specific to this agent, and
 `~/.config/lindwyrm/AGENTS.md` holds preferences that follow you across
 projects. `context_file` in config points somewhere else entirely.
 
