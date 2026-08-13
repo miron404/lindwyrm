@@ -55,6 +55,86 @@ MODEL_MAX_TOKENS_CEILING = 384_000
 
 
 # ---------------------------------------------------------------------------
+# Proxies
+# ---------------------------------------------------------------------------
+#
+# Three states have to be distinguishable, and TOML has no null:
+#   key absent   -> inherit (preset falls back to the global setting)
+#   "url"        -> use this proxy
+#   "" / false   -> go direct, ignoring the global setting
+#   "system"     -> honor HTTP_PROXY / HTTPS_PROXY / ALL_PROXY
+#
+# Internally None means "inherit" and the empty string means "direct", so the
+# resolved value is always a plain string. Environment proxies are NEVER used
+# unless "system" is asked for explicitly: a proxy is an explicit choice here,
+# and a stray ALL_PROXY silently rerouting an agent's API traffic is a nasty
+# surprise.
+
+PROXY_DIRECT = ""
+PROXY_SYSTEM = "system"
+
+# httpx supports exactly these; socks4 is not implemented by httpcore.
+PROXY_SCHEMES = ("http", "https", "socks5", "socks5h")
+
+
+def parse_proxy(raw, where: str) -> str:
+    """Validate one proxy setting and normalize it to its internal form."""
+    if raw is False or raw is None:
+        return PROXY_DIRECT
+    if not isinstance(raw, str):
+        raise SystemExit(f"{where}: proxy must be a string or false, got {raw!r}")
+
+    value = raw.strip()
+    if value == "" or value.lower() in ("direct", "none", "off"):
+        return PROXY_DIRECT
+    if value.lower() == PROXY_SYSTEM:
+        return PROXY_SYSTEM
+
+    scheme = value.split("://", 1)[0].lower() if "://" in value else ""
+    if scheme not in PROXY_SCHEMES:
+        extra = ""
+        if scheme == "socks4":
+            extra = " (socks4 is not supported by httpx; use socks5)"
+        raise SystemExit(
+            f"{where}: proxy must start with one of "
+            f"{', '.join(s + '://' for s in PROXY_SCHEMES)}, "
+            f"or be \"system\"/\"direct\"; got {value.split('://')[0]!r}{extra}"
+        )
+    if scheme.startswith("socks"):
+        try:
+            import socksio  # noqa: F401
+        except ImportError:
+            raise SystemExit(
+                f"{where}: a SOCKS proxy is configured but the 'socksio' "
+                f"package is missing. Install it with: pip install 'lindwyrm[socks]'"
+            ) from None
+    return value
+
+
+def mask_proxy(proxy: str) -> str:
+    """Proxy string safe to print: any password is replaced with ***.
+
+    Display only -- the real value is what gets handed to httpx.
+    """
+    if not proxy or proxy == PROXY_SYSTEM or "@" not in proxy:
+        return proxy or "direct"
+    from urllib.parse import urlsplit, urlunsplit
+
+    try:
+        parts = urlsplit(proxy)
+        if parts.password is None:
+            return proxy
+        host = parts.hostname or ""
+        if parts.port:
+            host = f"{host}:{parts.port}"
+        netloc = f"{parts.username or ''}:***@{host}"
+        return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+    except ValueError:
+        # Unparseable: better to show nothing than to risk showing a password.
+        return f"{proxy.split('://', 1)[0]}://***"
+
+
+# ---------------------------------------------------------------------------
 # Presets: everything needed to talk to one provider/model.
 # ---------------------------------------------------------------------------
 
@@ -76,6 +156,8 @@ class Preset:
     context_limit: int = 128_000
     # Send max_completion_tokens instead of max_tokens (OpenAI format only).
     max_completion_tokens: bool = False
+    # None means "inherit the global setting"; see PROXY_DIRECT / PROXY_SYSTEM.
+    proxy: str | None = None
     # Extra top-level fields merged into every request body verbatim (e.g. a
     # provider-specific flag). Rarely needed.
     extra_body: dict = field(default_factory=dict)
@@ -154,6 +236,8 @@ def _build_presets(data: dict) -> dict[str, Preset]:
             context_limit=int(entry.get("context_limit", base.context_limit if base else 128_000)),
             max_completion_tokens=bool(entry.get(
                 "max_completion_tokens", base.max_completion_tokens if base else False)),
+            proxy=(parse_proxy(entry["proxy"], f"presets.{name}.proxy")
+                   if "proxy" in entry else (base.proxy if base else None)),
             extra_body=dict(entry.get("extra_body", base.extra_body if base else {})),
         )
     return presets
@@ -276,6 +360,8 @@ class Config:
     thinking_budget: int = 4096
     temperature: float | None = None
     max_completion_tokens: bool = False
+    # Resolved proxy: "" = direct, "system" = use env vars, else a proxy URL.
+    proxy: str = PROXY_DIRECT
     project_root: Path = field(default_factory=Path.cwd)
     policy: Policy = field(default_factory=Policy)
     audit_log: Path | None = None
@@ -297,6 +383,10 @@ class Config:
     presets: dict = field(default_factory=dict)  # name -> Preset, for switching
     extra_body: dict = field(default_factory=dict)
     global_key_file: str | None = None  # root-level key_file fallback
+    global_proxy: str = PROXY_DIRECT    # root-level proxy, for presets that inherit
+    # Set by --proxy: outranks both the preset and the global setting, and
+    # survives /model, which a plain global default would not.
+    proxy_override: str | None = None
 
     def with_preset(self, name: str) -> "Config":
         """Switch to a different preset by name/alias, re-resolving its API key.
@@ -323,8 +413,18 @@ class Config:
             temperature=preset.temperature,
             context_limit=preset.context_limit,
             max_completion_tokens=preset.max_completion_tokens,
+            proxy=self.resolve_proxy(preset),
             extra_body=dict(preset.extra_body),
         )
+
+    def resolve_proxy(self, preset: Preset) -> str:
+        """Effective proxy for `preset`: --proxy, else the preset's own
+        setting, else the global default."""
+        if self.proxy_override is not None:
+            return self.proxy_override
+        if preset.proxy is not None:
+            return preset.proxy
+        return self.global_proxy
 
     def with_model(self, name: str) -> "Config":
         """Backward-compat alias for with_preset (used by /model and -m)."""
@@ -398,6 +498,7 @@ def load_config(
     presets = _build_presets(data)
     policy = _build_policy(data, root)
     global_key_file = data.get("key_file")
+    global_proxy = parse_proxy(data["proxy"], "proxy") if "proxy" in data else PROXY_DIRECT
 
     # Which preset to start on: default_preset (new), else legacy `model` key
     # (may be "flash"/"pro"/a preset name/a bare model id), else deepseek-flash.
@@ -421,6 +522,8 @@ def load_config(
         temperature=data.get("temperature", preset.temperature),
         max_completion_tokens=bool(data.get(
             "max_completion_tokens", preset.max_completion_tokens)),
+        proxy=preset.proxy if preset.proxy is not None else global_proxy,
+        global_proxy=global_proxy,
         project_root=root,
         policy=policy,
         audit_log=Path(os.path.expanduser(data["audit_log"])) if data.get("audit_log") else None,

@@ -54,6 +54,11 @@ for markdown rendering). You can read all of it in an afternoon.
 - **Retries**: 429s and 5xx are retried with exponential backoff and jitter
   (honoring `Retry-After`), so one blip doesn't kill a turn's work. A request
   is only retried if nothing has been streamed yet — never mid-answer.
+- **Per-provider proxy**: a global `proxy` plus a per-preset override, including
+  an explicit bypass so one provider can go direct while everything else is
+  proxied. SOCKS5 (`pip install 'lindwyrm[socks]'`) or HTTP. Off by default,
+  and `HTTP_PROXY`/`ALL_PROXY` are ignored unless you set `proxy = "system"` —
+  a stray variable in your shell won't silently reroute API traffic.
 - No telemetry. API keys are read only from the environment or a key file you
   point at (per preset) — never stored inline in a committed config.
 
@@ -93,7 +98,7 @@ them), `/thinking on|off`, `/think peek|show|hide` (or `/think` to reprint last
 reasoning), `/markdown on|off`, `/perm <path> read=.. write=.. delete=..` (set
 per-path rules; `reset` clears; no args shows the table), `/policy`,
 `/context` (how full the window is), `/compact` (summarize history now),
-`/clear`, `/help`, `/exit`.
+`/proxy` (show the proxy in use), `/clear`, `/help`, `/exit`.
 
 When the agent wants to write, delete, or run a command, you'll see a prompt:
 
@@ -140,6 +145,22 @@ write = "allow"
 path = "~/.ssh"
 read = "deny"
 ```
+
+Proxies are opt-in and resolve most-specific-first — `--proxy`, then the
+preset's own setting, then the global one:
+
+```toml
+proxy = "socks5h://127.0.0.1:1080"   # everything goes through here...
+
+[[presets]]
+name = "local-llm"
+base_url = "http://localhost:11434/v1"
+proxy = false                        # ...except this one, which goes direct
+```
+
+`proxy = "system"` opts back in to `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`.
+`socks5h://` and `socks5://` behave the same: httpx passes the hostname to the
+proxy, so DNS is resolved on the proxy side either way.
 
 ## Security notes & limits
 

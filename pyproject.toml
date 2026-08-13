@@ -19,6 +19,11 @@ dependencies = [
     "rich>=13.0",
 ]
 
+# SOCKS proxies need httpx's socks extra (pulls in socksio, ~30 KB of pure
+# Python with no dependencies of its own). HTTP proxies work without it.
+[project.optional-dependencies]
+socks = ["httpx[socks]>=0.27"]
+
 [project.urls]
 Homepage = "https://github.com/miron404/lindwyrm"
 Source = "https://github.com/miron404/lindwyrm"

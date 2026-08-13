@@ -27,6 +27,8 @@ from typing import Any, Callable, Iterator
 
 import httpx
 
+from .config import PROXY_DIRECT, PROXY_SYSTEM, mask_proxy
+
 # Status codes worth retrying: rate limits and transient server-side faults.
 RETRY_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504})
 
@@ -34,31 +36,50 @@ DEFAULT_MAX_ATTEMPTS = 4
 DEFAULT_BACKOFF_BASE = 1.0  # seconds; doubled each attempt
 MAX_BACKOFF = 30.0
 
-_client: httpx.Client | None = None
+# One client per distinct proxy setting. A proxy is baked into the client at
+# construction, so a single shared client can't serve presets with different
+# proxies -- but building one per request would throw away connection reuse,
+# which is the reason this cache exists at all.
+_clients: dict[str, httpx.Client] = {}
 
 
 class APIError(Exception):
     pass
 
 
-def get_client() -> httpx.Client:
-    """Return the process-wide httpx.Client, creating it on first use."""
-    global _client
-    if _client is None or _client.is_closed:
-        _client = httpx.Client(
-            timeout=httpx.Timeout(300.0, connect=30.0),
-            # An agent talks to one host at a time; a small pool is plenty.
-            limits=httpx.Limits(max_connections=4, max_keepalive_connections=2),
-        )
-    return _client
+def get_client(proxy: str = PROXY_DIRECT) -> httpx.Client:
+    """Return the pooled client for `proxy`, creating it on first use.
+
+    "" routes directly, "system" honors the HTTP_PROXY/ALL_PROXY environment
+    variables, anything else is a proxy URL.
+    """
+    client = _clients.get(proxy)
+    if client is not None and not client.is_closed:
+        return client
+
+    kwargs: dict = {
+        "timeout": httpx.Timeout(300.0, connect=30.0),
+        # An agent talks to one host at a time; a small pool is plenty.
+        "limits": httpx.Limits(max_connections=4, max_keepalive_connections=2),
+        # Environment proxies are opt-in: without this, a stray ALL_PROXY in
+        # the shell would silently reroute API traffic, and an explicit
+        # "go direct" setting would not actually go direct.
+        "trust_env": proxy == PROXY_SYSTEM,
+    }
+    if proxy and proxy != PROXY_SYSTEM:
+        kwargs["proxy"] = proxy
+
+    client = httpx.Client(**kwargs)
+    _clients[proxy] = client
+    return client
 
 
 def close_client() -> None:
-    """Close the shared client. Safe to call more than once."""
-    global _client
-    if _client is not None and not _client.is_closed:
-        _client.close()
-    _client = None
+    """Close every pooled client. Safe to call more than once."""
+    for client in _clients.values():
+        if not client.is_closed:
+            client.close()
+    _clients.clear()
 
 
 def backoff_delay(attempt: int, retry_after: float | None = None,
@@ -89,6 +110,7 @@ def stream_sse(
     headers: dict[str, str],
     body: dict[str, Any],
     *,
+    proxy: str = PROXY_DIRECT,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     sleep: Callable[[float], None] | None = None,
     on_retry: Callable[[int, str, float], None] | None = None,
@@ -105,7 +127,7 @@ def stream_sse(
     # time.sleep at import time and make the delay unpatchable.
     if sleep is None:
         sleep = time.sleep
-    client = get_client()
+    client = get_client(proxy)
     last_error: str = "unknown error"
 
     for attempt in range(1, max_attempts + 1):
@@ -128,9 +150,9 @@ def stream_sse(
                 return
 
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
-                httpx.RemoteProtocolError) as e:
+                httpx.RemoteProtocolError, httpx.ProxyError) as e:
             if attempt >= max_attempts:
-                raise APIError(f"{type(e).__name__}: {e}") from e
+                raise APIError(_redact(f"{type(e).__name__}: {e}", proxy)) from e
             last_error = type(e).__name__
             delay = backoff_delay(attempt)
             if on_retry:
@@ -138,6 +160,18 @@ def stream_sse(
             sleep(delay)
 
     raise APIError(f"Giving up after {max_attempts} attempts ({last_error}).")
+
+
+def _redact(message: str, proxy: str) -> str:
+    """Replace the configured proxy URL in a message with its masked form.
+
+    An exact substring swap of a value we already know -- deliberately not a
+    regex over arbitrary text, which would be guesswork. httpx puts the proxy
+    URL into connection errors, and that URL may carry a password.
+    """
+    if not proxy or proxy == PROXY_SYSTEM or proxy not in message:
+        return message
+    return message.replace(proxy, mask_proxy(proxy))
 
 
 def _iter_events(resp: httpx.Response) -> Iterator[tuple[str | None, dict]]:

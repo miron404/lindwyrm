@@ -151,6 +151,7 @@ def stream_message(
     url = cfg.base_url.rstrip("/") + "/v1/messages"
 
     for event_type, data in stream_sse(url, _headers(cfg), body,
+                                       proxy=cfg.proxy,
                                        max_attempts=cfg.max_retries,
                                        on_retry=on_retry):
         if event_type == "error":

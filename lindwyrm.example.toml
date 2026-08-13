@@ -37,6 +37,22 @@ default_preset = "flash"
 # exponential backoff and jitter. Only applies before any output has streamed.
 # max_retries = 4
 
+# --- Proxy ------------------------------------------------------------------
+# Off by default: traffic goes straight out, and HTTP_PROXY/HTTPS_PROXY/
+# ALL_PROXY are IGNORED unless you ask for them with "system". A proxy is an
+# explicit choice -- a stray variable in your shell will not silently reroute
+# API traffic.
+#
+#   proxy = "socks5h://127.0.0.1:1080"   # SOCKS5 (needs: pip install 'lindwyrm[socks]')
+#   proxy = "http://127.0.0.1:8080"      # HTTP proxy (no extra install)
+#   proxy = "system"                     # honor HTTP_PROXY / HTTPS_PROXY / ALL_PROXY
+#   proxy = false                        # explicitly direct
+#
+# socks5h:// and socks5:// behave identically here -- httpx hands the hostname
+# to the proxy either way, so DNS is always resolved on the proxy side.
+# Set it per-preset below to override this, or to false to bypass it.
+# proxy = "socks5h://127.0.0.1:1080"
+
 markdown = true            # render answers as Markdown via rich (false = plain)
 thinking_display = "peek"  # how to show reasoning: "peek" | "show" | "hide"
                            #   peek = stream live, then vanish when the answer starts
@@ -70,6 +86,8 @@ thinking_display = "peek"  # how to show reasoning: "peek" | "show" | "hide"
 #                                          # support DeepSeek-style thinking
 # max_tokens = 8192
 # context_limit = 128000                  # this model's window, for compaction
+# proxy = "socks5h://127.0.0.1:1080"      # this provider only; false = go direct
+#                                          # even when a global proxy is set
 # max_completion_tokens = false           # send "max_completion_tokens" instead
 #                                          # of "max_tokens". Newer OpenAI
 #                                          # reasoning models require it; most

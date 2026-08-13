@@ -23,6 +23,7 @@ Slash commands inside the REPL:
                                 (levels: allow|confirm|deny; "reset" clears;
                                  no args shows the table; path alone shows it)
     /policy                     show current permissions
+    /proxy                      show the proxy in use for this preset
     /context                    show how full the context window is
     /compact                    summarize older history away right now
     /clear                      clear conversation history
@@ -37,7 +38,7 @@ import sys
 from pathlib import Path
 
 from .agent import Agent
-from .config import Config, load_config
+from .config import Config, load_config, mask_proxy, parse_proxy
 from .http import APIError, close_client
 from .render import Renderer, _HAS_RICH
 from .sandbox import UserQuit, reset_session_grants
@@ -78,6 +79,8 @@ def _banner(cfg: Config) -> None:
     print(f"  perms:    read={p.read} write={p.write} delete={p.delete} bash={p.bash}")
     if p.rules:
         print(f"  {DIM}{len(p.rules)} path rule(s) — see /policy{RESET}")
+    if cfg.proxy:
+        print(f"  proxy:    {CYAN}{mask_proxy(cfg.proxy)}{RESET}")
     if cfg.policy.read_only:
         print(f"  {YELLOW}read-only mode{RESET}")
     print(f"  {DIM}/help for commands, /exit to quit{RESET}\n")
@@ -104,6 +107,20 @@ def _print_policy(cfg: Config) -> None:
             print(f"    {disp}: {' '.join(parts) if parts else '(no overrides)'}")
     else:
         print("  (no path rules)")
+
+
+def _print_proxy(cfg: Config) -> None:
+    """Show the effective proxy. Any password is masked -- never printed."""
+    print(f"{BOLD}Proxy{RESET}")
+    if cfg.proxy == "system":
+        print(f"  {CYAN}system{RESET} {DIM}(HTTP_PROXY / HTTPS_PROXY / ALL_PROXY){RESET}")
+    elif cfg.proxy:
+        print(f"  {CYAN}{mask_proxy(cfg.proxy)}{RESET} {DIM}(preset: {cfg.preset_name}){RESET}")
+    else:
+        print(f"  direct {DIM}(no proxy; environment variables are ignored){RESET}")
+    if cfg.global_proxy and cfg.global_proxy != cfg.proxy:
+        print(f"  {DIM}global default: {mask_proxy(cfg.global_proxy)} "
+              f"— overridden by this preset{RESET}")
 
 
 def _print_context(cfg: Config, agent) -> None:
@@ -356,6 +373,8 @@ def _handle_command(line: str, cfg: Config, agent: Agent, renderer: Renderer) ->
         _perm_command(cfg, parts[1:])
     elif cmd == "/policy":
         _print_policy(cfg)
+    elif cmd == "/proxy":
+        _print_proxy(cfg)
     elif cmd == "/context":
         _print_context(cfg, agent)
     elif cmd == "/compact":
@@ -435,7 +454,7 @@ def _perm_command(cfg: Config, args: list[str]) -> None:
 PRESET_FIELDS = (
     "preset_name", "format", "base_url", "model", "api_key",
     "thinking", "max_tokens", "thinking_budget", "temperature",
-    "context_limit", "max_completion_tokens", "extra_body",
+    "context_limit", "max_completion_tokens", "proxy", "extra_body",
 )
 
 
@@ -473,6 +492,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-markdown", action="store_true", help="disable rich markdown rendering")
     p.add_argument("-C", "--dir", help="project root (default: cwd)")
     p.add_argument("-p", "--prompt", help="one-shot prompt; run and exit")
+    p.add_argument("--proxy", metavar="URL",
+                   help="proxy for API traffic: socks5h://host:port, http://host:port, "
+                        "'system' to use HTTP_PROXY/ALL_PROXY, or 'direct' to force none")
     return p
 
 
@@ -498,6 +520,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.no_markdown:
         cfg.markdown = False
+
+    if args.proxy is not None:
+        # Recorded as an override rather than just a resolved value: it has
+        # to outrank a preset's own proxy after /model too, which a plain
+        # global default would not.
+        try:
+            cfg.proxy_override = cfg.proxy = parse_proxy(args.proxy, "--proxy")
+        except SystemExit as e:
+            print(e, file=sys.stderr)
+            return 2
 
     try:
         if args.prompt:
