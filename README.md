@@ -155,3 +155,8 @@ git tag v0.1.0 && git push origin v0.1.0
 
 Both `version` fields should be bumped together so the alias keeps pointing at
 a release that exists.
+
+The two projects use **separate GitHub environments** (`pypi-lindwyrm` and
+`pypi-lwyrm`). This isn't cosmetic: a pending trusted publisher must be unique
+across owner + repository + workflow + environment, so two projects registered
+against one shared environment is rejected by PyPI.

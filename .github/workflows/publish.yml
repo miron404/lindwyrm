@@ -43,7 +43,10 @@ jobs:
   publish-lindwyrm:
     needs: build
     runs-on: ubuntu-latest
-    environment: pypi
+    # Each PyPI project needs its OWN environment name: a pending trusted
+    # publisher must be unique across owner + repo + workflow + environment,
+    # so two projects sharing one environment cannot both be registered.
+    environment: pypi-lindwyrm
     permissions:
       id-token: write # required for Trusted Publishing
     steps:
@@ -58,7 +61,7 @@ jobs:
   publish-lwyrm:
     needs: build
     runs-on: ubuntu-latest
-    environment: pypi
+    environment: pypi-lwyrm
     permissions:
       id-token: write
     steps:
