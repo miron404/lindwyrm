@@ -181,6 +181,12 @@ git tag v0.1.0 && git push origin v0.1.0
 package reads it via setuptools' dynamic metadata, and the workflow stamps the
 same value into the alias package before building it.
 
+Bump the version in its own commit, made last, and tag that commit -- the
+workflow refuses to build when the tag doesn't match the version in the code.
+Without that check the mismatch is silent: `skip-existing` makes the upload of
+an already-published version succeed, so the run goes green having published
+nothing.
+
 Both projects publish from the same `pypi` environment. Note for anyone setting
 this up from scratch: a *pending* trusted publisher must be unique across
 owner + repository + workflow + environment, so the second project cannot be

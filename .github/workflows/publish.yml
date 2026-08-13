@@ -26,6 +26,36 @@ jobs:
       - name: Install build tooling
         run: python -m pip install --upgrade build
 
+      # A tag that doesn't match the version in the code builds the wrong
+      # commit's contents. With skip-existing on the upload that failure is
+      # silent -- the run goes green and publishes nothing -- so it is caught
+      # loudly here instead, before anything is built.
+      - name: Check the tag matches the version in the code
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          python - <<'PY'
+          import os, pathlib, re, sys
+
+          code = re.search(
+              r'__version__\s*=\s*"([^"]+)"',
+              pathlib.Path("lindwyrm/__init__.py").read_text(),
+          ).group(1)
+          tag = os.environ["GITHUB_REF_NAME"]
+          expected = f"v{code}"
+
+          if tag != expected:
+              sys.exit(
+                  f"::error::Tag {tag} does not match the version in "
+                  f"lindwyrm/__init__.py ({code}); expected the tag to be "
+                  f"{expected}. Either the version bump was not committed "
+                  f"before tagging, or the tag points at an older commit. "
+                  f"Move the tag to the commit that bumps the version, or cut "
+                  f"a new version -- a version already on PyPI cannot be "
+                  f"re-uploaded."
+              )
+          print(f"tag {tag} matches version {code}")
+          PY
+
       # lindwyrm/__init__.py is the single source of truth for the version.
       # The alias package builds from its own directory and can't read it, so
       # the value is stamped in here instead of being maintained by hand.
