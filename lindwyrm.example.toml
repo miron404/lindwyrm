@@ -70,6 +70,11 @@ thinking_display = "peek"  # how to show reasoning: "peek" | "show" | "hide"
 #                                          # support DeepSeek-style thinking
 # max_tokens = 8192
 # context_limit = 128000                  # this model's window, for compaction
+# max_completion_tokens = false           # send "max_completion_tokens" instead
+#                                          # of "max_tokens". Newer OpenAI
+#                                          # reasoning models require it; most
+#                                          # OpenAI-compatible servers want the
+#                                          # old field, so this stays off.
 
 # Example: a locally-hosted OpenAI-compatible server (no key needed --
 # api_key_env left empty means it'll fall back to key_file/global key_file,

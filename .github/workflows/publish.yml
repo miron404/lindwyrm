@@ -26,6 +26,26 @@ jobs:
       - name: Install build tooling
         run: python -m pip install --upgrade build
 
+      # lindwyrm/__init__.py is the single source of truth for the version.
+      # The alias package builds from its own directory and can't read it, so
+      # the value is stamped in here instead of being maintained by hand.
+      - name: Sync alias version with lindwyrm
+        run: |
+          python - <<'PY'
+          import pathlib, re
+          version = re.search(
+              r'__version__\s*=\s*"([^"]+)"',
+              pathlib.Path("lindwyrm/__init__.py").read_text(),
+          ).group(1)
+          alias = pathlib.Path("packaging/lwyrm/pyproject.toml")
+          text = alias.read_text()
+          text = re.sub(r'^version = ".*"$', f'version = "{version}"',
+                        text, count=1, flags=re.M)
+          text = re.sub(r'lindwyrm>=[0-9][^"]*', f'lindwyrm>={version}', text)
+          alias.write_text(text)
+          print(f"stamped alias package with version {version}")
+          PY
+
       - name: Build lindwyrm
         run: python -m build --outdir dist/lindwyrm .
 

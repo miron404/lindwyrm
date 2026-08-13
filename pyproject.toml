@@ -1,6 +1,6 @@
 [project]
 name = "lindwyrm"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A minimal, dependency-light CLI coding agent for any Anthropic- or OpenAI-compatible provider"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -32,3 +32,8 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["lindwyrm"]
+
+# Single source of truth for the version: lindwyrm/__init__.py.
+# packaging/lwyrm/pyproject.toml reads the same value at build time.
+[tool.setuptools.dynamic]
+version = {attr = "lindwyrm.__version__"}

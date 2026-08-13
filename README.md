@@ -171,12 +171,13 @@ two distributions: `lindwyrm` (the package) and `lwyrm` (an alias metapackage
 that only depends on it, so the name can't be typosquatted).
 
 ```bash
-# bump version in pyproject.toml and packaging/lwyrm/pyproject.toml, then:
+# bump __version__ in lindwyrm/__init__.py, then:
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
-Both `version` fields should be bumped together so the alias keeps pointing at
-a release that exists.
+`lindwyrm/__init__.py` is the single source of truth for the version: the main
+package reads it via setuptools' dynamic metadata, and the workflow stamps the
+same value into the alias package before building it.
 
 Both projects publish from the same `pypi` environment. Note for anyone setting
 this up from scratch: a *pending* trusted publisher must be unique across

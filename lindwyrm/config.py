@@ -74,6 +74,8 @@ class Preset:
     # Size of the model's context window, in tokens. Used to decide when the
     # conversation should be compacted -- it is not sent to the API.
     context_limit: int = 128_000
+    # Send max_completion_tokens instead of max_tokens (OpenAI format only).
+    max_completion_tokens: bool = False
     # Extra top-level fields merged into every request body verbatim (e.g. a
     # provider-specific flag). Rarely needed.
     extra_body: dict = field(default_factory=dict)
@@ -150,6 +152,8 @@ def _build_presets(data: dict) -> dict[str, Preset]:
             thinking_budget=int(entry.get("thinking_budget", base.thinking_budget if base else 4096)),
             temperature=entry.get("temperature", base.temperature if base else None),
             context_limit=int(entry.get("context_limit", base.context_limit if base else 128_000)),
+            max_completion_tokens=bool(entry.get(
+                "max_completion_tokens", base.max_completion_tokens if base else False)),
             extra_body=dict(entry.get("extra_body", base.extra_body if base else {})),
         )
     return presets
@@ -271,6 +275,7 @@ class Config:
     thinking: bool = True
     thinking_budget: int = 4096
     temperature: float | None = None
+    max_completion_tokens: bool = False
     project_root: Path = field(default_factory=Path.cwd)
     policy: Policy = field(default_factory=Policy)
     audit_log: Path | None = None
@@ -317,6 +322,7 @@ class Config:
             thinking_budget=preset.thinking_budget,
             temperature=preset.temperature,
             context_limit=preset.context_limit,
+            max_completion_tokens=preset.max_completion_tokens,
             extra_body=dict(preset.extra_body),
         )
 
@@ -413,6 +419,8 @@ def load_config(
         thinking=bool(data.get("thinking", preset.thinking)),
         thinking_budget=int(data.get("thinking_budget", preset.thinking_budget)),
         temperature=data.get("temperature", preset.temperature),
+        max_completion_tokens=bool(data.get(
+            "max_completion_tokens", preset.max_completion_tokens)),
         project_root=root,
         policy=policy,
         audit_log=Path(os.path.expanduser(data["audit_log"])) if data.get("audit_log") else None,

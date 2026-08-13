@@ -20,6 +20,16 @@ class SandboxError(Exception):
     """Raised when an operation is blocked by policy."""
 
 
+class UserQuit(Exception):
+    """Raised when the user answers [q]uit at a confirmation prompt.
+
+    Distinct from KeyboardInterrupt on purpose: answering "quit" is a
+    deliberate choice, while Ctrl+C is an interrupt, and any `except
+    KeyboardInterrupt` up the stack would otherwise swallow the two
+    identically.
+    """
+
+
 def resolve_target(cfg, path: str) -> Path:
     """Turn a user/model-supplied path into an absolute resolved Path.
 
@@ -92,7 +102,7 @@ def authorize(
         _session_grants.add(op)
         return target
     if ans in ("q", "quit"):
-        raise KeyboardInterrupt
+        raise UserQuit
     raise SandboxError(f"{op.capitalize()} declined by user.")
 
 
@@ -114,5 +124,5 @@ def bash_confirm(permission: str, summary: str) -> bool:
         _session_grants.add("bash")
         return True
     if ans in ("q", "quit"):
-        raise KeyboardInterrupt
+        raise UserQuit
     return False

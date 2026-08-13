@@ -90,7 +90,7 @@ def stream_sse(
     body: dict[str, Any],
     *,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-    sleep: Callable[[float], None] = time.sleep,
+    sleep: Callable[[float], None] | None = None,
     on_retry: Callable[[int, str, float], None] | None = None,
 ) -> Iterator[tuple[str | None, dict]]:
     """POST `body` and yield (event_type, parsed_data) for each SSE data line.
@@ -101,6 +101,10 @@ def stream_sse(
     on_retry(attempt, reason, delay) is called before each backoff sleep so the
     CLI can tell the user why it's pausing.
     """
+    # Resolved here rather than as a default argument, which would bind
+    # time.sleep at import time and make the delay unpatchable.
+    if sleep is None:
+        sleep = time.sleep
     client = get_client()
     last_error: str = "unknown error"
 

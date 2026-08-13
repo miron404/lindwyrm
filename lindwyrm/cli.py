@@ -40,7 +40,7 @@ from .agent import Agent
 from .config import Config, load_config
 from .http import APIError, close_client
 from .render import Renderer, _HAS_RICH
-from .sandbox import reset_session_grants
+from .sandbox import UserQuit, reset_session_grants
 
 try:
     from rich.console import Console as _RichConsole
@@ -291,6 +291,11 @@ def _do_turn(cfg: Config, agent: Agent, renderer: Renderer) -> None:
             on_notice=lambda msg: print(f"  {DIM}{msg}{RESET}"),
         )
         renderer.end_turn()
+    except UserQuit:
+        # The user chose [q]uit at a confirmation prompt: stop the turn, but
+        # stay in the REPL rather than tearing the session down.
+        renderer.end_turn()
+        print(f"\n{YELLOW}(stopped at your request){RESET}\n")
     except KeyboardInterrupt:
         renderer.end_turn()
         print(f"\n{YELLOW}(interrupted){RESET}\n")

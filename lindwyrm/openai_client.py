@@ -113,7 +113,12 @@ def _build_body(cfg: Config, messages: list[dict], tools: list[dict]) -> dict:
     if tools:
         body["tools"] = tools
     if cfg.max_tokens:
-        body["max_tokens"] = cfg.max_tokens
+        # OpenAI deprecated max_tokens in favour of max_completion_tokens and
+        # newer reasoning models reject the old field outright -- while plenty
+        # of OpenAI-compatible servers only understand the old one. Which to
+        # send is a per-provider fact, so it's a preset option.
+        field = "max_completion_tokens" if cfg.max_completion_tokens else "max_tokens"
+        body[field] = cfg.max_tokens
     if cfg.temperature is not None:
         body["temperature"] = cfg.temperature
     if cfg.extra_body:

@@ -17,7 +17,13 @@ import subprocess
 from pathlib import Path
 
 from .config import Config
-from .sandbox import SandboxError, authorize, bash_confirm, resolve_target
+from .sandbox import (
+    SandboxError,
+    UserQuit,
+    authorize,
+    bash_confirm,
+    resolve_target,
+)
 
 MAX_READ_BYTES = 256 * 1024  # don't dump huge files into context blindly
 
@@ -379,6 +385,10 @@ def run_tool(cfg: Config, name: str, tool_input: dict) -> tuple[str, bool]:
     try:
         result = func(cfg, **tool_input)
         return result, False
+    except (UserQuit, KeyboardInterrupt):
+        # Leaving the session is the user's decision, not a tool failure --
+        # it must reach the REPL rather than be reported back to the model.
+        raise
     except SandboxError as e:
         return str(e), True
     except TypeError as e:
