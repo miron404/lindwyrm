@@ -20,13 +20,10 @@ from __future__ import annotations
 import json
 from typing import Any, Iterator
 
-import httpx
-
 from .config import ANTHROPIC_VERSION, Config
+from .http import APIError, stream_sse
 
-
-class APIError(Exception):
-    pass
+__all__ = ["APIError", "StreamHandler", "stream_message"]
 
 
 def _headers(cfg: Config) -> dict[str, str]:
@@ -69,10 +66,23 @@ class StreamHandler:
     def __init__(self) -> None:
         self.content: list[dict] = []
         self.stop_reason: str | None = None
+        # Real token counts reported by the API, used for context tracking.
+        self.input_tokens: int = 0
+        self.output_tokens: int = 0
         self._blocks: dict[int, dict] = {}
 
     def feed(self, event_type: str, data: dict) -> Iterator[tuple[str, str]]:
-        if event_type == "content_block_start":
+        if event_type == "message_start":
+            usage = (data.get("message") or {}).get("usage") or {}
+            # Cache reads/writes are billed differently but still occupy the
+            # context window, so count them toward the input total.
+            self.input_tokens = (
+                int(usage.get("input_tokens", 0))
+                + int(usage.get("cache_read_input_tokens", 0))
+                + int(usage.get("cache_creation_input_tokens", 0))
+            )
+            self.output_tokens = int(usage.get("output_tokens", 0))
+        elif event_type == "content_block_start":
             idx = data["index"]
             block = data["content_block"]
             self._blocks[idx] = block
@@ -108,6 +118,9 @@ class StreamHandler:
                     block["input"] = {}
         elif event_type == "message_delta":
             self.stop_reason = data.get("delta", {}).get("stop_reason", self.stop_reason)
+            usage = data.get("usage") or {}
+            if "output_tokens" in usage:
+                self.output_tokens = int(usage["output_tokens"])
         elif event_type == "message_stop":
             # Finalize content in index order, stripping internal scratch keys.
             self.content = []
@@ -125,41 +138,26 @@ def stream_message(
     *,
     on_text=None,
     on_thinking=None,
+    on_retry=None,
 ) -> StreamHandler:
     """Send a streaming request and return the completed StreamHandler.
 
     on_text / on_thinking are optional callbacks(str) for live printing.
+    on_retry(attempt, reason, delay) fires when a transient failure is retried.
     """
     body = _build_body(cfg, messages, system, tools)
     body["stream"] = True
     handler = StreamHandler()
     url = cfg.base_url.rstrip("/") + "/v1/messages"
 
-    with httpx.Client(timeout=httpx.Timeout(300.0, connect=30.0)) as client:
-        with client.stream("POST", url, headers=_headers(cfg), json=body) as resp:
-            if resp.status_code != 200:
-                detail = resp.read().decode("utf-8", errors="replace")
-                raise APIError(f"HTTP {resp.status_code}: {detail}")
-            event_type = None
-            for raw in resp.iter_lines():
-                if not raw:
-                    continue
-                line = raw if isinstance(raw, str) else raw.decode("utf-8")
-                if line.startswith("event:"):
-                    event_type = line[len("event:"):].strip()
-                elif line.startswith("data:"):
-                    payload = line[len("data:"):].strip()
-                    if not payload:
-                        continue
-                    try:
-                        data = json.loads(payload)
-                    except json.JSONDecodeError:
-                        continue
-                    if event_type == "error":
-                        raise APIError(f"Stream error: {data}")
-                    for kind, chunk in handler.feed(event_type, data):
-                        if kind == "text" and on_text:
-                            on_text(chunk)
-                        elif kind == "thinking" and on_thinking:
-                            on_thinking(chunk)
+    for event_type, data in stream_sse(url, _headers(cfg), body,
+                                       max_attempts=cfg.max_retries,
+                                       on_retry=on_retry):
+        if event_type == "error":
+            raise APIError(f"Stream error: {data}")
+        for kind, chunk in handler.feed(event_type, data):
+            if kind == "text" and on_text:
+                on_text(chunk)
+            elif kind == "thinking" and on_thinking:
+                on_thinking(chunk)
     return handler

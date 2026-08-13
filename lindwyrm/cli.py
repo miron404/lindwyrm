@@ -23,6 +23,8 @@ Slash commands inside the REPL:
                                 (levels: allow|confirm|deny; "reset" clears;
                                  no args shows the table; path alone shows it)
     /policy                     show current permissions
+    /context                    show how full the context window is
+    /compact                    summarize older history away right now
     /clear                      clear conversation history
     /help                       show this help
     /exit, /quit                leave
@@ -35,8 +37,8 @@ import sys
 from pathlib import Path
 
 from .agent import Agent
-from .client import APIError
 from .config import Config, load_config
+from .http import APIError, close_client
 from .render import Renderer, _HAS_RICH
 from .sandbox import reset_session_grants
 
@@ -102,6 +104,32 @@ def _print_policy(cfg: Config) -> None:
             print(f"    {disp}: {' '.join(parts) if parts else '(no overrides)'}")
     else:
         print("  (no path rules)")
+
+
+def _print_context(cfg: Config, agent) -> None:
+    used = agent.context_tokens()
+    limit = cfg.context_limit
+    pct = agent.context_fraction() * 100
+    measured = "measured" if agent.last_input_tokens else "estimated"
+    bar_width = 24
+    filled = min(bar_width, int(bar_width * pct / 100))
+    bar = "█" * filled + "·" * (bar_width - filled)
+    color = RED if pct >= 90 else (YELLOW if pct >= cfg.compact_threshold * 100 else GREEN)
+    print(f"{BOLD}Context{RESET}")
+    print(f"  {color}{bar}{RESET} {pct:.0f}%  ({used:,} / {limit:,} tokens, {measured})")
+    print(f"  messages: {len(agent.messages)}   output so far: {agent.total_output_tokens:,} tokens")
+    if cfg.auto_compact:
+        print(f"  {DIM}auto-compacts at {cfg.compact_threshold * 100:.0f}%{RESET}")
+    else:
+        print(f"  {DIM}auto-compaction off — use /compact{RESET}")
+
+
+def _make_retry_printer():
+    """Callback that tells the user why the client is pausing before a retry."""
+    def on_retry(attempt: int, reason: str, delay: float) -> None:
+        print(f"  {YELLOW}{reason}{RESET} {DIM}— retrying in {delay:.1f}s "
+              f"(attempt {attempt}){RESET}")
+    return on_retry
 
 
 def _rel_display(cfg: Config, p) -> str:
@@ -259,6 +287,8 @@ def _do_turn(cfg: Config, agent: Agent, renderer: Renderer) -> None:
             on_thinking=renderer.on_thinking if cfg.thinking else None,
             on_tool=renderer.on_tool,
             on_tool_result=on_tool_result,
+            on_retry=_make_retry_printer(),
+            on_notice=lambda msg: print(f"  {DIM}{msg}{RESET}"),
         )
         renderer.end_turn()
     except KeyboardInterrupt:
@@ -320,8 +350,16 @@ def _handle_command(line: str, cfg: Config, agent: Agent, renderer: Renderer) ->
         _perm_command(cfg, parts[1:])
     elif cmd == "/policy":
         _print_policy(cfg)
+    elif cmd == "/context":
+        _print_context(cfg, agent)
+    elif cmd == "/compact":
+        print(f"  {DIM}summarizing older history…{RESET}")
+        ok, note = agent.compact(on_retry=_make_retry_printer())
+        print(f"  {GREEN if ok else YELLOW}{note}{RESET}")
+        _print_context(cfg, agent)
     elif cmd == "/clear":
         agent.messages.clear()
+        agent.last_input_tokens = 0
         print("history cleared")
     else:
         print(f"unknown command: {cmd} (try /help)")
@@ -442,15 +480,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.no_markdown:
         cfg.markdown = False
 
-    if args.prompt:
-        agent = Agent(cfg)
-        agent.add_user(args.prompt)
-        renderer = Renderer(thinking_mode=cfg.thinking_display, enabled=cfg.markdown)
-        _do_turn(cfg, agent, renderer)
-        return 0
+    try:
+        if args.prompt:
+            agent = Agent(cfg)
+            agent.add_user(args.prompt)
+            renderer = Renderer(thinking_mode=cfg.thinking_display, enabled=cfg.markdown)
+            _do_turn(cfg, agent, renderer)
+            return 0
 
-    run_repl(cfg)
-    return 0
+        run_repl(cfg)
+        return 0
+    finally:
+        close_client()  # release the pooled connection
 
 
 if __name__ == "__main__":

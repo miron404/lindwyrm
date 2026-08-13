@@ -71,6 +71,9 @@ class Preset:
     max_tokens: int = 8192
     thinking_budget: int = 4096
     temperature: float | None = None
+    # Size of the model's context window, in tokens. Used to decide when the
+    # conversation should be compacted -- it is not sent to the API.
+    context_limit: int = 128_000
     # Extra top-level fields merged into every request body verbatim (e.g. a
     # provider-specific flag). Rarely needed.
     extra_body: dict = field(default_factory=dict)
@@ -146,6 +149,7 @@ def _build_presets(data: dict) -> dict[str, Preset]:
             max_tokens=int(entry.get("max_tokens", base.max_tokens if base else 8192)),
             thinking_budget=int(entry.get("thinking_budget", base.thinking_budget if base else 4096)),
             temperature=entry.get("temperature", base.temperature if base else None),
+            context_limit=int(entry.get("context_limit", base.context_limit if base else 128_000)),
             extra_body=dict(entry.get("extra_body", base.extra_body if base else {})),
         )
     return presets
@@ -273,6 +277,17 @@ class Config:
     markdown: bool = True
     thinking_display: str = "peek"
 
+    # Transient-failure retries (429/5xx, connect and read errors).
+    max_retries: int = 4
+    # Context management. When the input tokens the API reports for a turn
+    # exceed context_limit * compact_threshold, older history is summarized
+    # away. Every token in history is re-sent (and re-billed) on every single
+    # turn, so an un-managed session gets expensive well before it errors.
+    context_limit: int = 128_000
+    auto_compact: bool = True
+    compact_threshold: float = 0.75
+    compact_keep_last: int = 4  # recent messages kept verbatim when compacting
+
     preset_name: str = DEFAULT_PRESET
     presets: dict = field(default_factory=dict)  # name -> Preset, for switching
     extra_body: dict = field(default_factory=dict)
@@ -301,6 +316,7 @@ class Config:
             max_tokens=preset.max_tokens,
             thinking_budget=preset.thinking_budget,
             temperature=preset.temperature,
+            context_limit=preset.context_limit,
             extra_body=dict(preset.extra_body),
         )
 
@@ -402,6 +418,11 @@ def load_config(
         audit_log=Path(os.path.expanduser(data["audit_log"])) if data.get("audit_log") else None,
         markdown=bool(data.get("markdown", True)),
         thinking_display=str(data.get("thinking_display", "peek")),
+        max_retries=max(1, int(data.get("max_retries", 4))),
+        context_limit=int(data.get("context_limit", preset.context_limit)),
+        auto_compact=bool(data.get("auto_compact", True)),
+        compact_threshold=float(data.get("compact_threshold", 0.75)),
+        compact_keep_last=max(0, int(data.get("compact_keep_last", 4))),
         preset_name=preset.name,
         presets=presets,
         extra_body=dict(preset.extra_body),

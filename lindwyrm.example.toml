@@ -24,6 +24,19 @@ default_preset = "flash"
 # thinking_budget = 4096     # reasoning token budget when thinking is on
 # temperature = 0.3          # only applied when thinking = false
 
+# --- Context management ----------------------------------------------------
+# Every token of history is re-sent on every turn, so a long session keeps
+# costing more even when nothing new happens. Once the window is this full,
+# older history is replaced by a model-written summary and work continues.
+# auto_compact = true
+# compact_threshold = 0.75   # fraction of context_limit that triggers it
+# compact_keep_last = 4      # recent messages kept verbatim, never summarized
+# context_limit = 128000     # your model's window; also settable per-preset
+
+# Retries for transient failures (429 / 5xx / connect timeouts), with
+# exponential backoff and jitter. Only applies before any output has streamed.
+# max_retries = 4
+
 markdown = true            # render answers as Markdown via rich (false = plain)
 thinking_display = "peek"  # how to show reasoning: "peek" | "show" | "hide"
                            #   peek = stream live, then vanish when the answer starts
@@ -56,6 +69,7 @@ thinking_display = "peek"  # how to show reasoning: "peek" | "show" | "hide"
 # thinking = false                        # most OpenAI-compatible models don't
 #                                          # support DeepSeek-style thinking
 # max_tokens = 8192
+# context_limit = 128000                  # this model's window, for compaction
 
 # Example: a locally-hosted OpenAI-compatible server (no key needed --
 # api_key_env left empty means it'll fall back to key_file/global key_file,

@@ -33,10 +33,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import httpx
-
-from .client import APIError  # shared exception type across both clients
 from .config import Config
+from .http import APIError, stream_sse  # shared exception type across both clients
 
 
 def _headers(cfg: Config) -> dict[str, str]:
@@ -146,12 +144,21 @@ class OpenAIStreamHandler:
     def __init__(self) -> None:
         self.content: list[dict] = []
         self.stop_reason: str | None = None
+        # Real token counts, from the usage-only chunk that stream_options
+        # asks the provider to send. Left at 0 by providers that ignore it.
+        self.input_tokens: int = 0
+        self.output_tokens: int = 0
         self._text = ""
         self._tool_calls: dict[int, dict] = {}  # index -> {id, name, args}
 
     def feed_chunk(self, data: dict) -> tuple[str | None, str | None]:
         """Process one SSE chunk. Returns (text_delta, thinking_delta), either
         of which may be None."""
+        usage = data.get("usage")
+        if usage:
+            self.input_tokens = int(usage.get("prompt_tokens", 0))
+            self.output_tokens = int(usage.get("completion_tokens", 0))
+
         choices = data.get("choices") or []
         if not choices:
             return None, None  # e.g. a trailing usage-only chunk
@@ -215,6 +222,7 @@ def stream_message(
     *,
     on_text=None,
     on_thinking=None,
+    on_retry=None,
 ) -> OpenAIStreamHandler:
     """Send a streaming chat.completions request and return the completed
     handler. Same calling convention as client.stream_message (Anthropic)."""
@@ -222,31 +230,16 @@ def stream_message(
     handler = OpenAIStreamHandler()
     url = cfg.base_url.rstrip("/") + "/chat/completions"
 
-    with httpx.Client(timeout=httpx.Timeout(300.0, connect=30.0)) as client:
-        with client.stream("POST", url, headers=_headers(cfg), json=body) as resp:
-            if resp.status_code != 200:
-                detail = resp.read().decode("utf-8", errors="replace")
-                raise APIError(f"HTTP {resp.status_code}: {detail}")
-            for raw in resp.iter_lines():
-                if not raw:
-                    continue
-                line = raw if isinstance(raw, str) else raw.decode("utf-8")
-                if not line.startswith("data:"):
-                    continue
-                payload = line[len("data:"):].strip()
-                if not payload or payload == "[DONE]":
-                    continue
-                try:
-                    data = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
-                if "error" in data:
-                    raise APIError(f"Stream error: {data['error']}")
-                text_out, think_out = handler.feed_chunk(data)
-                if text_out and on_text:
-                    on_text(text_out)
-                if think_out and on_thinking:
-                    on_thinking(think_out)
+    for _event, data in stream_sse(url, _headers(cfg), body,
+                                   max_attempts=cfg.max_retries,
+                                   on_retry=on_retry):
+        if "error" in data:
+            raise APIError(f"Stream error: {data['error']}")
+        text_out, think_out = handler.feed_chunk(data)
+        if text_out and on_text:
+            on_text(text_out)
+        if think_out and on_thinking:
+            on_thinking(think_out)
 
     handler.finalize()
     return handler

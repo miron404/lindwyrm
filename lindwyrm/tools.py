@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import signal
 import subprocess
 from pathlib import Path
 
@@ -19,6 +20,26 @@ from .config import Config
 from .sandbox import SandboxError, authorize, bash_confirm, resolve_target
 
 MAX_READ_BYTES = 256 * 1024  # don't dump huge files into context blindly
+
+# Directories that are almost never what a search is looking for. Walking them
+# wastes time and floods the model's context with vendored or generated code.
+SKIP_DIRS = frozenset({
+    ".git", ".hg", ".svn",
+    "node_modules", "bower_components", "vendor",
+    ".venv", "venv", "env", "__pycache__", ".mypy_cache", ".pytest_cache",
+    ".ruff_cache", ".tox", ".nox", ".eggs",
+    "dist", "build", "target", ".next", ".nuxt", ".output",
+    ".idea", ".vscode", ".gradle", ".terraform", ".cache",
+})
+
+
+def _is_skipped(path: Path, base: Path) -> bool:
+    """True if `path` sits inside one of SKIP_DIRS, relative to `base`."""
+    try:
+        parts = path.relative_to(base).parts
+    except ValueError:
+        parts = path.parts
+    return any(p in SKIP_DIRS for p in parts)
 
 
 # ---------------------------------------------------------------------------
@@ -229,9 +250,14 @@ def tool_list_dir(cfg: Config, path: str | None = None) -> str:
 def tool_glob(cfg: Config, pattern: str, path: str | None = None) -> str:
     raw = path or str(cfg.project_root)
     base = authorize(cfg, "read", raw, f"glob {pattern} in {_reld(cfg, raw)}")
-    matches = sorted(str(p.relative_to(base)) for p in base.glob(pattern) if p.is_file())
-    matches = [m for m in matches if ".git/" not in m and not m.startswith(".git")]
-    return "\n".join(matches[:500]) if matches else "(no matches)"
+    matches = sorted(
+        str(p.relative_to(base))
+        for p in base.glob(pattern)
+        if p.is_file() and not _is_skipped(p, base)
+    )
+    if len(matches) > 500:
+        return "\n".join(matches[:500]) + f"\n... ({len(matches)} matches, showing 500)"
+    return "\n".join(matches) if matches else "(no matches)"
 
 
 def tool_grep(cfg: Config, pattern: str, path: str | None = None, glob: str | None = None) -> str:
@@ -246,7 +272,7 @@ def tool_grep(cfg: Config, pattern: str, path: str | None = None, glob: str | No
     results = []
     files = base.rglob(glob) if glob else base.rglob("*")
     for f in files:
-        if not f.is_file() or ".git" in f.parts:
+        if not f.is_file() or _is_skipped(f, base):
             continue
         try:
             for i, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
@@ -270,6 +296,24 @@ def tool_delete_file(cfg: Config, path: str) -> str:
     return f"Deleted {_rel(cfg, target)}"
 
 
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """SIGTERM the command's whole process group, SIGKILL what survives."""
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, OSError):
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            return
+        try:
+            proc.wait(timeout=2)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
 def tool_bash(cfg: Config, command: str, timeout: int = 60) -> str:
     if cfg.policy.read_only:
         raise SandboxError("Bash blocked: running in read-only mode.")
@@ -285,18 +329,29 @@ def tool_bash(cfg: Config, command: str, timeout: int = 60) -> str:
     if not bash_confirm(perm, f"run: {cmd}"):
         raise SandboxError("Bash declined by user.")
     timeout = max(1, min(int(timeout), 600))
+    # start_new_session puts the command in its own process group so that a
+    # timeout or Ctrl+C kills the whole tree. subprocess.run() would only
+    # signal the shell itself, leaving its children running in the background.
+    proc = subprocess.Popen(
+        cmd,
+        shell=True,
+        cwd=str(cfg.project_root),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
     try:
-        proc = subprocess.run(
-            cmd,
-            shell=True,
-            cwd=str(cfg.project_root),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        _kill_process_tree(proc)
+        proc.communicate()
         raise SandboxError(f"Command timed out after {timeout}s.")
-    out = (proc.stdout or "") + (proc.stderr or "")
+    except KeyboardInterrupt:
+        _kill_process_tree(proc)
+        proc.communicate()
+        raise
+    out = (stdout or "") + (stderr or "")
     out = out.strip() or "(no output)"
     if len(out) > 30_000:
         out = out[:30_000] + "\n... (output truncated)"

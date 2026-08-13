@@ -44,6 +44,14 @@ for markdown rendering). You can read all of it in an afternoon.
 - **Reasoning display** you control: thinking streams live and then vanishes
   when the answer begins (`peek`), or stays in scrollback (`show`), or is
   hidden (`hide`). `/think` reprints the last turn's reasoning on demand.
+- **Context management**: every token of history is re-sent (and re-billed) on
+  every turn, so long sessions get expensive well before they hit the model's
+  limit. lindwyrm tracks the token count the API actually reports and, once the
+  window is 75% full, summarizes older history away and continues. `/context`
+  shows how full it is; `/compact` does it on demand.
+- **Retries**: 429s and 5xx are retried with exponential backoff and jitter
+  (honoring `Retry-After`), so one blip doesn't kill a turn's work. A request
+  is only retried if nothing has been streamed yet — never mid-answer.
 - No telemetry. API keys are read only from the environment or a key file you
   point at (per preset) — never stored inline in a committed config.
 
@@ -81,8 +89,9 @@ lwyrm -p "add type hints to utils.py"   # one-shot, then exit
 Slash commands in the REPL: `/model <name>` (switch preset), `/presets` (list
 them), `/thinking on|off`, `/think peek|show|hide` (or `/think` to reprint last
 reasoning), `/markdown on|off`, `/perm <path> read=.. write=.. delete=..` (set
-per-path rules; `reset` clears; no args shows the table), `/policy`, `/clear`,
-`/help`, `/exit`.
+per-path rules; `reset` clears; no args shows the table), `/policy`,
+`/context` (how full the window is), `/compact` (summarize history now),
+`/clear`, `/help`, `/exit`.
 
 When the agent wants to write, delete, or run a command, you'll see a prompt:
 
@@ -138,8 +147,21 @@ read = "deny"
 - Path permissions protect against accidental/strayed file operations and
   resolve symlinks/`../` before matching; they are not a defense against a write
   you confirm yourself.
-- No context-window management yet: very long sessions will eventually hit the
-  model's limit. Use `/clear` between tasks.
+- Compaction is lossy by nature: it replaces older turns with a model-written
+  summary. It cuts only at user-turn boundaries so tool calls are never split
+  from their results, but details outside the summary are gone. Use `/clear`
+  between unrelated tasks rather than relying on it.
+
+## Tests
+
+```bash
+python -m unittest discover -s tests
+```
+
+Stdlib `unittest`, no test dependencies. Covers permission resolution, path
+escaping (`../` and symlinks), the OpenAI wire-format translation, compaction
+boundaries, and retry backoff — everything that can be checked without a
+network call.
 
 ## Releasing
 
