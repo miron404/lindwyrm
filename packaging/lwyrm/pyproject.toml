@@ -1,8 +1,9 @@
 [project]
 name = "lwyrm"
-version = "0.1.0"
+version = "0.2.0"  # kept in step with lindwyrm; the publish workflow stamps it
 description = "Alias for lindwyrm -- installs the agent whose CLI command is `lwyrm`"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -14,14 +15,14 @@ classifiers = [
 # package. The `lwyrm` command itself comes from lindwyrm's [project.scripts],
 # so this package deliberately declares no entry points of its own -- two
 # distributions installing the same console script would collide in PATH.
-dependencies = ["lindwyrm>=0.1.0"]
+dependencies = ["lindwyrm>=0.2.0"]
 
 [project.urls]
 Homepage = "https://github.com/miron404/lindwyrm"
 Source = "https://github.com/miron404/lindwyrm"
 
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]

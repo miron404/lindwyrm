@@ -3,6 +3,8 @@ name = "lindwyrm"
 dynamic = ["version"]
 description = "A minimal, dependency-light CLI coding agent for any Anthropic- or OpenAI-compatible provider"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 keywords = ["cli", "coding-agent", "llm", "anthropic", "openai", "deepseek"]
 classifiers = [
@@ -27,7 +29,7 @@ lwyrm = "lindwyrm.cli:main"
 lindwyrm = "lindwyrm.cli:main"
 
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]  # PEP 639 SPDX license fields
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]

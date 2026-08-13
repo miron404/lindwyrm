@@ -188,3 +188,7 @@ pre-registered against the same environment while the first is still pending.
 Once the first project has actually been published its publisher is no longer
 pending and the second can be registered normally — or give each project its
 own environment from the start.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 miron404.
