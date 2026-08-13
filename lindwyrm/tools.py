@@ -219,7 +219,17 @@ def tool_read_file(cfg: Config, path: str, start_line: int | None = None, end_li
     target = authorize(cfg, "read", path, f"read {_reld(cfg, path)}")
     if not target.is_file():
         raise SandboxError(f"Not a file: {target}")
-    data = target.read_bytes()
+    if _looks_binary(target):
+        size = target.stat().st_size
+        raise SandboxError(
+            f"{_rel(cfg, target)} looks like a binary file ({size} bytes). "
+            f"Reading it would put mojibake in the conversation; use bash "
+            f"(file, xxd, strings) if you need to inspect it."
+        )
+    try:
+        data = target.read_bytes()
+    except OSError as e:
+        raise SandboxError(f"Could not read {_rel(cfg, target)}: {e}") from None
     if len(data) > MAX_READ_BYTES and start_line is None:
         raise SandboxError(
             f"File is {len(data)} bytes (> {MAX_READ_BYTES}). "
@@ -227,13 +237,25 @@ def tool_read_file(cfg: Config, path: str, start_line: int | None = None, end_li
         )
     text = data.decode("utf-8", errors="replace")
     lines = text.splitlines()
-    s = (start_line - 1) if start_line else 0
-    e = end_line if end_line else len(lines)
-    s = max(0, s)
-    e = min(len(lines), e)
+    if not lines:
+        return "(empty file)"
+
+    s = max(0, (start_line - 1) if start_line else 0)
+    e = min(len(lines), end_line if end_line else len(lines))
+    if s >= len(lines):
+        # Saying "(empty file)" here was a plain lie, and the model believed
+        # it -- an out-of-range window is not an empty file.
+        raise SandboxError(
+            f"start_line {start_line} is past the end of "
+            f"{_rel(cfg, target)}, which has {len(lines)} lines."
+        )
+    if e <= s:
+        raise SandboxError(
+            f"Empty line range: start_line {start_line} is not before "
+            f"end_line {end_line}."
+        )
     width = len(str(e))
-    out = [f"{str(i + 1).rjust(width)}\t{lines[i]}" for i in range(s, e)]
-    return "\n".join(out) if out else "(empty file)"
+    return "\n".join(f"{str(i + 1).rjust(width)}\t{lines[i]}" for i in range(s, e))
 
 
 def tool_write_file(cfg: Config, path: str, content: str) -> str:
@@ -304,14 +326,31 @@ def _mini_diff(old: str, new: str) -> str:
 def tool_list_dir(cfg: Config, path: str | None = None) -> str:
     raw = path or str(cfg.project_root)
     target = authorize(cfg, "read", raw, f"list {_reld(cfg, raw)}")
+    if not target.exists():
+        raise SandboxError(f"Does not exist: {target}")
     if not target.is_dir():
         raise SandboxError(f"Not a directory: {target}")
-    entries = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+    try:
+        entries = sorted(target.iterdir(),
+                         key=lambda p: (not p.is_dir(), p.name.lower()))
+    except OSError as e:
+        raise SandboxError(f"Could not list {_rel(cfg, target)}: {e}") from None
+
     out = []
     for p in entries:
-        if p.name.startswith("."):
-            continue
-        out.append(f"{p.name}/" if p.is_dir() else p.name)
+        # Dotfiles are listed. Hiding them meant .github/, .gitignore and
+        # every config file were invisible -- and silently so, since glob
+        # returns dotfiles but never directories, leaving a hidden directory
+        # unreachable by any read tool.
+        if p.is_symlink():
+            try:
+                out.append(f"{p.name}@ -> {os.readlink(p)}")
+            except OSError:
+                out.append(f"{p.name}@")
+        elif p.is_dir():
+            out.append(f"{p.name}/")
+        else:
+            out.append(p.name)
     return "\n".join(out) if out else "(empty directory)"
 
 
@@ -374,6 +413,15 @@ def tool_grep(cfg: Config, pattern: str, path: str | None = None, glob: str | No
 
 def tool_delete_file(cfg: Config, path: str) -> str:
     resolved = resolve_target(cfg, path)
+    # A dangling symlink exists as a link but not as a target, and exists()
+    # follows the link -- so a broken link could never be removed.
+    raw = Path(os.path.expanduser(path))
+    if not raw.is_absolute():
+        raw = cfg.project_root / raw
+    if raw.is_symlink():
+        target = authorize(cfg, "delete", path, f"DELETE symlink {_rel(cfg, raw)}")
+        raw.unlink()
+        return f"Deleted symlink {_rel(cfg, raw)} (its target was left alone)"
     if not resolved.exists():
         raise SandboxError(f"Does not exist: {resolved}")
     if resolved.is_dir():

@@ -1,5 +1,6 @@
 """File tools: editing, searching, and the guards around them."""
 
+import os
 import tempfile
 import unittest
 from dataclasses import dataclass
@@ -10,9 +11,11 @@ from lindwyrm.sandbox import SandboxError
 from lindwyrm.tools import (
     _looks_binary,
     _match_lines,
+    tool_delete_file,
     tool_edit_file,
     tool_glob,
     tool_grep,
+    tool_list_dir,
     tool_read_file,
 )
 
@@ -182,6 +185,69 @@ class TestBinarySniff(ToolTestCase):
         self.assertTrue(_looks_binary(p))
 
 
+class TestListDir(ToolTestCase):
+    def test_dotfiles_and_dot_directories_are_listed(self):
+        """They used to be skipped silently, which hid .github/, .gitignore
+        and every config file -- and glob never returns directories, so a
+        hidden directory was unreachable by any read tool."""
+        self.write(".gitignore", "*.pyc")
+        self.write(".github/workflows/ci.yml", "name: ci")
+        self.write("visible.py", "x")
+        out = tool_list_dir(self.cfg)
+        self.assertIn(".gitignore", out)
+        self.assertIn(".github/", out)
+        self.assertIn("visible.py", out)
+
+    def test_directories_sort_before_files(self):
+        self.write("a_file.txt", "x")
+        (self.root / "z_dir").mkdir()
+        out = tool_list_dir(self.cfg).splitlines()
+        self.assertLess(out.index("z_dir/"), out.index("a_file.txt"))
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlinks unsupported")
+    def test_symlinks_are_marked_with_their_target(self):
+        self.write("real.txt", "x")
+        (self.root / "link.txt").symlink_to("real.txt")
+        self.assertIn("link.txt@ -> real.txt", tool_list_dir(self.cfg))
+
+    def test_missing_directory_says_so(self):
+        with self.assertRaises(SandboxError) as ctx:
+            tool_list_dir(self.cfg, "nope")
+        self.assertIn("Does not exist", str(ctx.exception))
+
+    def test_empty_directory(self):
+        (self.root / "empty").mkdir()
+        self.assertEqual(tool_list_dir(self.cfg, "empty"), "(empty directory)")
+
+
+class TestDeleteFile(ToolTestCase):
+    def setUp(self):
+        super().setUp()
+        # delete defaults to "confirm"; leaving it there makes the tool block
+        # on input() waiting for a confirmation nobody is present to give.
+        self.cfg.policy.delete = "allow"
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlinks unsupported")
+    def test_a_broken_symlink_can_be_deleted(self):
+        """exists() follows the link, so a dangling one could never be
+        removed -- it reported that it did not exist."""
+        (self.root / "dangling").symlink_to(self.root / "gone")
+        tool_delete_file(self.cfg, "dangling")
+        self.assertFalse((self.root / "dangling").is_symlink())
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlinks unsupported")
+    def test_deleting_a_symlink_leaves_its_target(self):
+        self.write("real.txt", "keep me")
+        (self.root / "link.txt").symlink_to(self.root / "real.txt")
+        tool_delete_file(self.cfg, "link.txt")
+        self.assertEqual((self.root / "real.txt").read_text(), "keep me")
+
+    def test_directories_are_refused(self):
+        (self.root / "sub").mkdir()
+        with self.assertRaises(SandboxError):
+            tool_delete_file(self.cfg, "sub")
+
+
 class TestReadFile(ToolTestCase):
     def test_line_numbers_are_prefixed(self):
         self.write("a.py", "one\ntwo\n")
@@ -195,6 +261,37 @@ class TestReadFile(ToolTestCase):
         self.assertNotIn("\t1", out)
         self.assertIn("\t2", out)
         self.assertIn("\t3", out)
+
+    def test_out_of_range_start_is_an_error_not_an_empty_file(self):
+        """It used to answer '(empty file)' for a perfectly full file."""
+        self.write("a.py", "one\ntwo\n")
+        with self.assertRaises(SandboxError) as ctx:
+            tool_read_file(self.cfg, "a.py", start_line=99)
+        msg = str(ctx.exception)
+        self.assertIn("past the end", msg)
+        self.assertIn("2 lines", msg)
+
+    def test_inverted_range_is_an_error(self):
+        self.write("a.py", "1\n2\n3\n4\n5\n")
+        with self.assertRaises(SandboxError):
+            tool_read_file(self.cfg, "a.py", start_line=4, end_line=2)
+
+    def test_genuinely_empty_file_still_reports_empty(self):
+        self.write("e.txt", "")
+        self.assertEqual(tool_read_file(self.cfg, "e.txt"), "(empty file)")
+
+    def test_binary_files_are_refused(self):
+        """Decoding a PNG into the conversation is pure context poison."""
+        (self.root / "blob.bin").write_bytes(b"\x89PNG\x00\x01\x02binary")
+        with self.assertRaises(SandboxError) as ctx:
+            tool_read_file(self.cfg, "blob.bin")
+        self.assertIn("binary", str(ctx.exception))
+
+    def test_crlf_and_unicode_survive(self):
+        self.write("m.txt", "line1\r\nпривет\r\n")
+        out = tool_read_file(self.cfg, "m.txt")
+        self.assertIn("привет", out)
+        self.assertNotIn("\r", out)
 
     def test_oversized_file_requires_a_range(self):
         self.write("big.txt", "x" * (300 * 1024))
