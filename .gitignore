@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Local config & secrets -- never commit an API key or a personal policy file
+.lindwyrm.toml
+*.key
+
+# Audit logs
+*.jsonl
+
+# Machine-local tool settings
+.claude/settings.local.json

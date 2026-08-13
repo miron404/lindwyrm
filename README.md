@@ -1,0 +1,133 @@
+# lindwyrm
+
+A minimal, dependency-light coding agent that talks directly to model APIs --
+**DeepSeek** (V4 Flash / Pro) out of the box, plus any other **Anthropic- or
+OpenAI-compatible** provider you add as a preset (OpenRouter-style
+aggregators, Kimi, a local vLLM/Ollama server, whatever you use).
+
+Built because the off-the-shelf agents carry telemetry and a long supply chain
+of packages that have a habit of trying to exfiltrate API keys. This is one
+small package with a single runtime dependency (`httpx`, plus optional `rich`
+for markdown rendering). You can read all of it in an afternoon.
+
+## What it does
+
+- **Presets**: DeepSeek Flash/Pro ship built in (`flash`/`pro`). Add your own
+  via `[[presets]]` in config to point at any other provider -- each preset
+  bundles a wire format (`anthropic` or `openai`), `base_url`, `model`, and
+  which env var(s) hold its key. Switch anytime with `/model <name>` or
+  `-m <name>`; `/presets` lists what's available.
+- Talks to the API directly over raw HTTP (no `openai`/`anthropic` SDK) --
+  streams responses including **thinking/reasoning** where supported, and
+  correctly echoes DeepSeek's thinking blocks back in history (its Anthropic
+  endpoint returns 400 otherwise). For OpenAI-format presets, reasoning is
+  shown live if the provider streams it but isn't echoed back (not required
+  there, and some providers reject unknown fields).
+- Tools: `read_file`, `write_file`, `edit_file`, `list_dir`, `glob`, `grep`,
+  `delete_file`, `bash` -- work identically no matter which preset/provider
+  is active.
+- **Path-based permissions**: every read/write/delete resolves to a level —
+  `allow` (silent), `confirm` (ask first), or `deny` (blocked) — from a global
+  default plus per-path rules. The most specific rule wins, so you can open a
+  folder broadly and still lock a subfolder inside it. Defaults: read=allow,
+  write=confirm, delete=confirm. `../` and symlink escapes are resolved before
+  matching, so a link can't dodge a rule.
+- **Set rules in config or on the fly**: `[[policy.rules]]` entries in your
+  `.lindwyrm.toml`, or `/perm <path> write=allow delete=confirm` during a session.
+- **Bash is separate** (a shell command isn't path-bound): a single global level
+  (default confirm) plus an always-on denylist and an optional allowlist for
+  safe commands (`git status`, `ls`, …).
+- Optional **read-only** mode (forces write/delete to deny) and a JSON-lines
+  **audit log**.
+- **Markdown rendering** of answers via `rich` (code blocks with syntax
+  highlighting, tables, lists), streamed live as the model writes.
+- **Reasoning display** you control: thinking streams live and then vanishes
+  when the answer begins (`peek`), or stays in scrollback (`show`), or is
+  hidden (`hide`). `/think` reprints the last turn's reasoning on demand.
+- No telemetry. API keys are read only from the environment or a key file you
+  point at (per preset) — never stored inline in a committed config.
+
+## Install
+
+```bash
+cd lindwyrm
+pip install -e .          # installs the `lwyrm` command (and `lindwyrm` as an alias)
+export DEEPSEEK_API_KEY=sk-...
+```
+
+(Requires Python 3.11+.)
+
+## Use
+
+```bash
+lwyrm                    # interactive REPL in the current directory
+lwyrm -m pro             # use the deepseek-pro preset
+lwyrm -m kimi            # use a custom preset you defined in config
+lwyrm --no-thinking      # disable thinking mode
+lwyrm --read-only        # answer only; never write or run
+lwyrm -C ~/myproject     # set project root
+lwyrm -p "add type hints to utils.py"   # one-shot, then exit
+```
+
+Slash commands in the REPL: `/model <name>` (switch preset), `/presets` (list
+them), `/thinking on|off`, `/think peek|show|hide` (or `/think` to reprint last
+reasoning), `/markdown on|off`, `/perm <path> read=.. write=.. delete=..` (set
+per-path rules; `reset` clears; no args shows the table), `/policy`, `/clear`,
+`/help`, `/exit`.
+
+When the agent wants to write, delete, or run a command, you'll see a prompt:
+
+```
+  WRITE requested: create src/main.py (412 chars)
+    print("hello")
+    ...
+  Allow? [y]es / [n]o / [a]lways (write) / [q]uit:
+```
+
+`always` grants that operation for the rest of the current user turn only.
+
+## Configure
+
+Copy `lindwyrm.example.toml` to `./.lindwyrm.toml` (project) or
+`~/.config/lindwyrm/config.toml` (user). Project settings override user settings.
+Key options:
+
+```toml
+default_preset = "flash"   # "flash", "pro", or a name from [[presets]] below
+
+# Add your own provider (Anthropic- or OpenAI-compatible):
+[[presets]]
+name = "kimi"
+format = "openai"
+base_url = "https://api.tokenrouter.com/v1"
+model = "moonshotai/kimi-k3-free"
+api_key_env = ["TOKENROUTER_API_KEY"]
+thinking = false
+
+[policy]
+read   = "allow"        # global defaults; most specific rule below wins
+write  = "confirm"
+delete = "confirm"
+bash   = "confirm"      # bash isn't path-scoped
+bash_allowlist = ["git status", "ls"]
+bash_denylist  = ["sudo", "curl"]
+
+[[policy.rules]]        # write freely in generated/, but still confirm deletes
+path = "generated"
+write = "allow"
+
+[[policy.rules]]        # keep the agent out of your keys
+path = "~/.ssh"
+read = "deny"
+```
+
+## Security notes & limits
+
+- `bash` runs through the shell. The denylist is a backstop, not a jail — the
+  real protection is that `bash` defaults to `confirm`, so you see every command
+  before it runs. If you want stronger isolation, run lindwyrm inside a container.
+- Path permissions protect against accidental/strayed file operations and
+  resolve symlinks/`../` before matching; they are not a defense against a write
+  you confirm yourself.
+- No context-window management yet: very long sessions will eventually hit the
+  model's limit. Use `/clear` between tasks.

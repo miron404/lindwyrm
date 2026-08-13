@@ -1,0 +1,135 @@
+# Example lindwyrm config.
+# Copy to ./.lindwyrm.toml (project-local) or ~/.config/lindwyrm/config.toml (user).
+# Project-local settings override user settings.
+#
+# The API key is NEVER read from this file inline. Set it via environment:
+#     export DEEPSEEK_API_KEY=sk-...
+# or point key_file at a file OUTSIDE your repo:
+#     key_file = "~/.secrets/deepseek.key"
+
+# key_file = "~/.secrets/deepseek.key"     # fallback API key file (used by any
+                                            # preset with no matching env var set)
+
+# Which preset to start on. Built in: "flash" / "pro" (both DeepSeek, via
+# DeepSeek's Anthropic-compatible endpoint). Set this to a name from
+# [[presets]] below to default to a custom provider instead.
+default_preset = "flash"
+
+# These top-level fields, if set, override the selected preset's own values
+# (kept for backward compatibility with configs written before presets
+# existed -- new setups are usually better off setting things per-preset below).
+# base_url = "https://api.deepseek.com/anthropic"
+# max_tokens = 8192          # ceiling is 384000; thinking tokens count toward this
+# thinking = true
+# thinking_budget = 4096     # reasoning token budget when thinking is on
+# temperature = 0.3          # only applied when thinking = false
+
+markdown = true            # render answers as Markdown via rich (false = plain)
+thinking_display = "peek"  # how to show reasoning: "peek" | "show" | "hide"
+                           #   peek = stream live, then vanish when the answer starts
+                           #   show = stream live and keep it in scrollback
+                           #   hide = don't show it (still available via /think)
+
+# Append a JSON-lines audit trail of every tool call:
+# audit_log = "~/.local/share/lindwyrm/audit.jsonl"
+
+# ---------------------------------------------------------------------------
+# Presets: each one is a provider + model + API key source, switchable with
+# `-m <name>` or `/model <name>` in the REPL. DeepSeek Flash/Pro are built in
+# (names "deepseek-flash"/"deepseek-pro", aliases "flash"/"pro") -- you don't
+# need to declare them. Add your own below to point at ANY OpenAI- or
+# Anthropic-compatible endpoint: OpenRouter, TokenRouter, a local vLLM/Ollama
+# server, Kimi, GLM, whatever you're using.
+#
+# format = "openai"    -> standard OpenAI Chat Completions wire format
+# format = "anthropic" -> Anthropic Messages wire format (like DeepSeek's own
+#                          /anthropic endpoint)
+# ---------------------------------------------------------------------------
+
+# Example: an OpenAI-compatible aggregator/router.
+# [[presets]]
+# name = "kimi"
+# format = "openai"
+# base_url = "https://api.tokenrouter.com/v1"
+# model = "moonshotai/kimi-k3-free"
+# api_key_env = ["TOKENROUTER_API_KEY"]   # env var(s) to check, in order
+# thinking = false                        # most OpenAI-compatible models don't
+#                                          # support DeepSeek-style thinking
+# max_tokens = 8192
+
+# Example: a locally-hosted OpenAI-compatible server (no key needed --
+# api_key_env left empty means it'll fall back to key_file/global key_file,
+# or you can point api_key_env at a var you set to any placeholder string).
+# [[presets]]
+# name = "local"
+# format = "openai"
+# base_url = "http://localhost:11434/v1"
+# model = "qwen2.5-coder:32b"
+# api_key_env = ["LOCAL_API_KEY"]
+
+# Example: another Anthropic-compatible endpoint.
+# [[presets]]
+# name = "claude-direct"
+# format = "anthropic"
+# base_url = "https://api.anthropic.com"
+# model = "claude-sonnet-4-6"
+# api_key_env = ["ANTHROPIC_API_KEY"]
+# thinking = true
+
+
+[policy]
+# Global default permission for each operation, applied to any path that has
+# no more specific rule below. Levels: "allow" | "confirm" | "deny"
+#   allow   = do it without asking
+#   confirm = ask every time (you see the path/preview first)
+#   deny    = never (also accepts "forbid" as a synonym)
+read   = "allow"           # reading/listing/searching
+write  = "confirm"         # creating/overwriting/editing files
+delete = "confirm"         # deleting files
+
+# bash is NOT path-scoped (a shell command can escape any directory), so it has
+# a single global level plus allow/deny lists below.
+bash   = "confirm"
+
+# read_only = true         # hard switch: forces write & delete to deny everywhere
+
+# Commands matching these prefixes are auto-allowed even when bash = "confirm".
+bash_allowlist = ["git status", "git diff", "git log", "ls", "cat", "pytest"]
+
+# Commands containing any of these are ALWAYS blocked (added to safe defaults).
+bash_denylist = ["sudo", "curl", "wget"]
+
+# ---------------------------------------------------------------------------
+# Per-path rules. Each rule overrides the global defaults for a path (a folder
+# covers everything inside it). The MOST SPECIFIC matching rule wins, so you
+# can open a folder broadly and still lock a subfolder inside it.
+# Any of read/write/delete may be omitted to inherit the global default.
+# ---------------------------------------------------------------------------
+
+# Let the agent write freely in an output folder, but still confirm deletes:
+[[policy.rules]]
+path = "generated"
+write = "allow"
+# delete inherits the global "confirm"
+
+# Trust a scratch folder fully (write AND delete without asking):
+# [[policy.rules]]
+# path = "scratch"
+# write = "allow"
+# delete = "allow"
+
+# Lock a sensitive subfolder even though its parent might be writable:
+# [[policy.rules]]
+# path = "src/vendor"
+# write = "deny"
+# delete = "deny"
+
+# Optional: keep the agent out of sensitive files entirely. Uncomment any you
+# want. (By default reading is allowed everywhere.)
+# [[policy.rules]]
+# path = "~/.ssh"
+# read = "deny"
+# [[policy.rules]]
+# path = "~/.aws"
+# read = "deny"
+
