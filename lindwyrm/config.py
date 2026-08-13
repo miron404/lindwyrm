@@ -412,6 +412,11 @@ class Config:
     # LINDWYRM.md then AGENTS.md in the project root.
     context_file: str | None = None
 
+    # Write each turn to ~/.local/share/lindwyrm/sessions so a closed
+    # terminal doesn't lose the conversation.
+    save_sessions: bool = True
+    session_retention_days: int = 30
+
     preset_name: str = DEFAULT_PRESET
     presets: dict = field(default_factory=dict)  # name -> Preset, for switching
     extra_body: dict = field(default_factory=dict)
@@ -588,6 +593,8 @@ def load_config(
         offload_threshold_tokens=max(1, int(data.get("offload_threshold_tokens", 1_000))),
         offload_eager_tokens=max(1, int(data.get("offload_eager_tokens", 8_000))),
         context_file=data.get("context_file"),
+        save_sessions=bool(data.get("save_sessions", True)),
+        session_retention_days=max(1, int(data.get("session_retention_days", 30))),
         preset_name=preset.name,
         presets=presets,
         extra_body=dict(preset.extra_body),

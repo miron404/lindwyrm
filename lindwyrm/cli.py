@@ -23,6 +23,7 @@ Slash commands inside the REPL:
                                 (levels: allow|confirm|deny; "reset" clears;
                                  no args shows the table; path alone shows it)
     /policy                     show current permissions
+    /sessions                   list saved sessions for this project
     /init                       write a starter AGENTS.md for this project
     /proxy                      show the proxy in use for this preset
     /context                    show how full the context window is
@@ -42,10 +43,20 @@ from pathlib import Path
 from .agent import Agent
 from .config import Config, load_config, mask_proxy, parse_proxy
 from .http import APIError, close_client
+from . import offload
 from .offload import get_store
 from .project import CONTEXT_FILENAMES, TEMPLATE, find_context_file
 from .render import Renderer, _HAS_RICH
 from .sandbox import UserQuit, reset_session_grants
+from .session import (
+    describe_age,
+    latest_session_id,
+    list_sessions,
+    load_session,
+    new_session_id,
+    save_session,
+    sweep_sessions,
+)
 
 try:
     from rich.console import Console as _RichConsole
@@ -115,6 +126,18 @@ def _print_policy(cfg: Config) -> None:
             print(f"    {disp}: {' '.join(parts) if parts else '(no overrides)'}")
     else:
         print("  (no path rules)")
+
+
+def _print_sessions(cfg: Config) -> None:
+    sessions = list_sessions(cfg.project_root)
+    if not sessions:
+        print(f"  {DIM}no saved sessions for this project yet{RESET}")
+        return
+    print(f"{BOLD}Sessions{RESET} {DIM}(this project){RESET}")
+    for entry in sessions:
+        print(f"  {CYAN}{entry['id']}{RESET}  {describe_age(entry['updated']):>9}  "
+              f"{entry['messages']:>3} msg  {DIM}{entry['title']}{RESET}")
+    print(f"  {DIM}resume with: lwyrm --resume <id>{RESET}")
 
 
 def _init_context_file(cfg: Config) -> None:
@@ -345,9 +368,47 @@ def _make_prompt() -> str:
 PROMPT = _make_prompt()
 
 
-def run_repl(cfg: Config) -> None:
-    _setup_history()
+def _make_agent(cfg: Config, args) -> Agent:
+    """Build the agent, resuming a saved session when asked."""
     agent = Agent(cfg)
+    if not cfg.save_sessions:
+        return agent
+
+    sweep_sessions(cfg.session_retention_days)
+    wanted = args.resume if getattr(args, "resume", None) else None
+    if wanted is None and getattr(args, "continue_", False):
+        wanted = latest_session_id(cfg.project_root)
+        if wanted is None:
+            print(f"  {DIM}no previous session for this project; starting fresh{RESET}")
+
+    if wanted:
+        state = load_session(wanted)
+        if state is None:
+            print(f"  {RED}no such session:{RESET} {wanted}")
+        else:
+            agent.session_id = wanted
+            agent.session_created = state.get("created")
+            # The offload store has to exist under the session's own name
+            # before restore(), or the recovered refs point at a directory
+            # this process will never write to.
+            offload.set_store(offload.OffloadStore(session_id=wanted))
+            agent.restore(state)
+            print(f"  {GREEN}resumed{RESET} {CYAN}{wanted}{RESET} "
+                  f"{DIM}({len(agent.messages)} messages, "
+                  f"{describe_age(state.get('updated', 0))}){RESET}")
+            if state.get("preset") and state["preset"] != cfg.preset_name:
+                print(f"  {YELLOW}note:{RESET} saved with preset "
+                      f"{state['preset']}, now running {cfg.preset_name}")
+            return agent
+
+    agent.session_id = new_session_id()
+    offload.set_store(offload.OffloadStore(session_id=agent.session_id))
+    return agent
+
+
+def run_repl(cfg: Config, args=None) -> None:
+    _setup_history()
+    agent = _make_agent(cfg, args) if args is not None else Agent(cfg)
     _banner(cfg, agent)
     renderer = Renderer(
         thinking_mode=cfg.thinking_display,
@@ -382,6 +443,19 @@ def run_repl(cfg: Config) -> None:
         _do_turn(cfg, agent, renderer)
 
 
+def _persist(cfg: Config, agent: Agent) -> None:
+    """Write the session out. Called after every turn, not just at exit --
+    the whole point is surviving a crash or a closed terminal."""
+    if not cfg.save_sessions or not agent.session_id:
+        return
+    state = agent.snapshot()
+    state["project_root"] = str(cfg.project_root)
+    state["preset"] = cfg.preset_name
+    state["model"] = cfg.model
+    state["created"] = agent.session_created
+    save_session(agent.session_id, state)
+
+
 def _do_turn(cfg: Config, agent: Agent, renderer: Renderer) -> None:
     reset_session_grants()  # re-confirm "always" grants each user turn
     renderer.thinking_mode = cfg.thinking_display  # pick up /think changes
@@ -401,6 +475,7 @@ def _do_turn(cfg: Config, agent: Agent, renderer: Renderer) -> None:
         )
         renderer.end_turn()
         _turn_summary(cfg, agent, cost_before)
+        _persist(cfg, agent)
     except UserQuit:
         # The user chose [q]uit at a confirmation prompt: stop the turn, but
         # stay in the REPL rather than tearing the session down.
@@ -466,6 +541,8 @@ def _handle_command(line: str, cfg: Config, agent: Agent, renderer: Renderer) ->
         _perm_command(cfg, parts[1:])
     elif cmd == "/policy":
         _print_policy(cfg)
+    elif cmd == "/sessions":
+        _print_sessions(cfg)
     elif cmd == "/init":
         _init_context_file(cfg)
     elif cmd == "/proxy":
@@ -485,7 +562,12 @@ def _handle_command(line: str, cfg: Config, agent: Agent, renderer: Renderer) ->
     elif cmd == "/clear":
         agent.messages.clear()
         agent.last_input_tokens = 0
-        print("history cleared")
+        # A fresh id: the previous session stays on disk rather than being
+        # overwritten by the empty one that follows.
+        if cfg.save_sessions:
+            agent.session_id = new_session_id()
+            agent.session_created = None
+        print("history cleared (new session started)")
     else:
         print(f"unknown command: {cmd} (try /help)")
     return False
@@ -593,6 +675,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-markdown", action="store_true", help="disable rich markdown rendering")
     p.add_argument("-C", "--dir", help="project root (default: cwd)")
     p.add_argument("-p", "--prompt", help="one-shot prompt; run and exit")
+    p.add_argument("-c", "--continue", dest="continue_", action="store_true",
+                   help="resume the most recent session for this project")
+    p.add_argument("--resume", metavar="ID",
+                   help="resume a specific session (see /sessions)")
+    p.add_argument("--no-save", action="store_true",
+                   help="don't write this session to disk")
     p.add_argument("--proxy", metavar="URL",
                    help="proxy for API traffic: socks5h://host:port, http://host:port, "
                         "'system' to use HTTP_PROXY/ALL_PROXY, or 'direct' to force none")
@@ -632,15 +720,18 @@ def main(argv: list[str] | None = None) -> int:
             print(e, file=sys.stderr)
             return 2
 
+    if args.no_save:
+        cfg.save_sessions = False
+
     try:
         if args.prompt:
-            agent = Agent(cfg)
+            agent = _make_agent(cfg, args)
             agent.add_user(args.prompt)
             renderer = Renderer(thinking_mode=cfg.thinking_display, enabled=cfg.markdown)
             _do_turn(cfg, agent, renderer)
             return 0
 
-        run_repl(cfg)
+        run_repl(cfg, args)
         return 0
     finally:
         close_client()  # release the pooled connection

@@ -164,6 +164,9 @@ class Agent:
         # Kept beside the history rather than inside the blocks: an unknown
         # field in a tool_result block would go out over the wire.
         self._tool_labels: dict[str, str] = {}
+        # Set by the CLI; None means this conversation isn't being saved.
+        self.session_id: str | None = None
+        self.session_created: float | None = None
 
     def add_user(self, text: str) -> None:
         self.messages.append({"role": "user", "content": [{"type": "text", "text": text}]})
@@ -207,6 +210,40 @@ class Agent:
         send = openai_client.stream_message if cfg.format == "openai" else stream_message
         return send(cfg, messages, system, tools,
                     on_text=on_text, on_thinking=on_thinking, on_retry=on_retry)
+
+    # -- persistence --------------------------------------------------------
+
+    def snapshot(self) -> dict:
+        """Everything needed to pick this conversation up again.
+
+        The message list goes out verbatim, thinking blocks included: DeepSeek
+        rejects a history that has had them stripped, so a session saved
+        without them would resume straight into a 400.
+        """
+        return {
+            "messages": self.messages,
+            "tool_labels": self._tool_labels,
+            "last_input_tokens": self.last_input_tokens,
+            "totals": {
+                "output": self.total_output_tokens,
+                "cache_read": self.total_cache_read_tokens,
+                "cache_write": self.total_cache_write_tokens,
+                "fresh_input": self.total_fresh_input_tokens,
+            },
+            "offloaded": get_store().export(),
+        }
+
+    def restore(self, state: dict) -> None:
+        """Load a snapshot back in."""
+        self.messages = state.get("messages") or []
+        self._tool_labels = dict(state.get("tool_labels") or {})
+        self.last_input_tokens = int(state.get("last_input_tokens") or 0)
+        totals = state.get("totals") or {}
+        self.total_output_tokens = int(totals.get("output", 0))
+        self.total_cache_read_tokens = int(totals.get("cache_read", 0))
+        self.total_cache_write_tokens = int(totals.get("cache_write", 0))
+        self.total_fresh_input_tokens = int(totals.get("fresh_input", 0))
+        get_store().restore(state.get("offloaded") or [])
 
     def has_prices(self) -> bool:
         return any(getattr(self.cfg, f, None) is not None

@@ -50,8 +50,12 @@ class OffloadEntry:
 class OffloadStore:
     """Holds offloaded tool results for one session."""
 
-    def __init__(self, root: Path | None = None) -> None:
-        self.root = root or (DEFAULT_ROOT / f"{int(time.time())}-{os.getpid()}")
+    def __init__(self, root: Path | None = None,
+                 session_id: str | None = None) -> None:
+        # Named after the session when there is one, so a resumed session
+        # finds the same directory and its stubs still resolve.
+        default = DEFAULT_ROOT / (session_id or f"{int(time.time())}-{os.getpid()}")
+        self.root = root or default
         self._entries: dict[str, OffloadEntry] = {}
         self._counter = 0
         self._ready = False
@@ -124,6 +128,40 @@ class OffloadStore:
             f"full snapshot, or read_file for the file's current contents."
         )
 
+    # -- persistence --------------------------------------------------------
+
+    def export(self) -> list[dict]:
+        """Index for the session file. The content stays in its own files."""
+        return [
+            {"ref": e.ref, "path": str(e.path), "label": e.label,
+             "lines": e.lines, "chars": e.chars}
+            for e in self._entries.values()
+        ]
+
+    def restore(self, entries: list[dict]) -> None:
+        """Re-adopt offloaded results when a session is resumed.
+
+        Entries whose file has gone (swept, or the disk cleaned) are dropped:
+        a ref that resolves to nothing would be worse than one the model is
+        told it cannot have.
+        """
+        for item in entries or []:
+            path = Path(item.get("path", ""))
+            if not path.is_file():
+                continue
+            ref = item.get("ref", "")
+            if not ref:
+                continue
+            self._entries[ref] = OffloadEntry(
+                ref=ref, path=path, label=item.get("label", "tool result"),
+                lines=int(item.get("lines", 0)), chars=int(item.get("chars", 0)))
+            self._ready = True
+            digits = "".join(c for c in ref if c.isdigit())
+            if digits:
+                # Keep numbering past the highest restored ref so new
+                # offloads can't collide with old ones.
+                self._counter = max(self._counter, int(digits))
+
     def cleanup(self) -> None:
         """Remove this session's directory."""
         try:
@@ -140,10 +178,10 @@ class OffloadStore:
 _store: OffloadStore | None = None
 
 
-def get_store() -> OffloadStore:
+def get_store(session_id: str | None = None) -> OffloadStore:
     global _store
     if _store is None:
-        _store = OffloadStore()
+        _store = OffloadStore(session_id=session_id)
         sweep_old_sessions()
     return _store
 

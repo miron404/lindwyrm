@@ -78,6 +78,11 @@ default_preset = "flash"
 # write a starter template.
 # context_file = "docs/agent-notes.md"
 
+# Conversations are saved to ~/.local/share/lindwyrm/sessions after every
+# turn, scoped to the project directory. Resume with --continue / --resume.
+# save_sessions = true
+# session_retention_days = 30
+
 markdown = true            # render answers as Markdown via rich (false = plain)
 thinking_display = "peek"  # how to show reasoning: "peek" | "show" | "hide"
                            #   peek = stream live, then vanish when the answer starts

@@ -106,6 +106,9 @@ lwyrm --no-thinking      # disable thinking mode
 lwyrm --read-only        # answer only; never write or run
 lwyrm -C ~/myproject     # set project root
 lwyrm -p "add type hints to utils.py"   # one-shot, then exit
+lwyrm --continue         # pick up the last session in this project
+lwyrm --resume <id>      # pick up a specific one (see /sessions)
+lwyrm --no-save          # leave no trace on disk
 ```
 
 Slash commands in the REPL: `/model <name>` (switch preset), `/presets` (list
@@ -113,8 +116,8 @@ them), `/thinking on|off`, `/think peek|show|hide` (or `/think` to reprint last
 reasoning), `/markdown on|off`, `/perm <path> read=.. write=.. delete=..` (set
 per-path rules; `reset` clears; no args shows the table), `/policy`,
 `/context` (how full the window is), `/compact [instructions]` (compact now),
-`/init` (write a starter `AGENTS.md`), `/proxy` (show the proxy in use),
-`/clear`, `/help`, `/exit`.
+`/sessions` (list saved sessions), `/init` (write a starter `AGENTS.md`),
+`/proxy` (show the proxy in use), `/clear`, `/help`, `/exit`.
 
 When the agent wants to write, delete, or run a command, you'll see a prompt:
 
@@ -238,6 +241,21 @@ proxy, so DNS is resolved on the proxy side either way.
   `~/.local/share/lindwyrm/offload/` and is swept after 7 days. Note that an
   offloaded result is a *snapshot*: the file may have changed since, which is
   exactly why it is copied rather than re-read on demand.
+
+## Sessions
+
+Every turn is written to `~/.local/share/lindwyrm/sessions/`, so closing the
+terminal doesn't throw away the conversation. `--continue` resumes the most
+recent session **for the current project** — sessions are scoped to the
+directory they ran in, so one checkout never resumes another's work.
+`/sessions` lists them, `--resume <id>` picks one, `/clear` starts a new one
+without touching what is already saved.
+
+Resuming restores the offloaded tool results too, so the `[offloaded: ...]`
+markers in the history still resolve. Files are written `0600` in a `0700`
+directory: a session holds whatever the agent read, which is often source
+code and sometimes more. `--no-save` skips writing entirely, and sessions
+older than 30 days are swept.
 
 ## Cost
 
