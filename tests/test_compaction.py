@@ -1,6 +1,7 @@
 """History compaction: cutting in the wrong place is an API 400, so the
 boundary logic is the part worth pinning down."""
 
+import pathlib
 import unittest
 
 from lindwyrm.agent import estimate_tokens, find_cut_index, is_turn_boundary
@@ -140,6 +141,11 @@ class TestCompact(unittest.TestCase):
             format: str = "anthropic"
             thinking: bool = True
             audit_log: object = None
+            project_root: object = pathlib.Path("/nonexistent-project")
+            # Point the user-level lookup at nothing, so a real
+            # ~/.config/lindwyrm/AGENTS.md on the machine running the tests
+            # can't leak into them.
+            user_context_dir: object = pathlib.Path("/nonexistent-userdir")
 
         agent = Agent(Cfg(compact_keep_last=keep_last))
         agent.messages = [

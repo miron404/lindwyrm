@@ -9,6 +9,7 @@ current contents.
 import dataclasses
 import tempfile
 import time
+import pathlib
 import unittest
 from pathlib import Path
 
@@ -136,6 +137,8 @@ class Cfg:
     format: str = "anthropic"
     thinking: bool = True
     audit_log: object = None
+    project_root: object = pathlib.Path("/nonexistent-project")
+    user_context_dir: object = pathlib.Path("/nonexistent-userdir")
 
 
 class TestMicrocompact(StoreTestCase):

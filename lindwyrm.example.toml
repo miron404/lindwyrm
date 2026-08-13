@@ -72,6 +72,12 @@ default_preset = "flash"
 # for a model server elsewhere on the LAN -- exact host, domain suffix or CIDR:
 # no_proxy = ["192.168.0.0/16", ".internal", "ollama.box"]
 
+# Project instructions prepended to the system prompt. Unset means look for
+# LINDWYRM.md then AGENTS.md in the project root; ~/.config/lindwyrm/AGENTS.md
+# is loaded too, for preferences that apply in every project. Run /init to
+# write a starter template.
+# context_file = "docs/agent-notes.md"
+
 markdown = true            # render answers as Markdown via rich (false = plain)
 thinking_display = "peek"  # how to show reasoning: "peek" | "show" | "hide"
                            #   peek = stream live, then vanish when the answer starts

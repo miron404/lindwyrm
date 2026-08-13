@@ -21,6 +21,7 @@ from . import openai_client
 from .client import StreamHandler, stream_message
 from .config import Config
 from .offload import estimate_text_tokens, get_store
+from .project import load_project_context
 from .tools import TOOL_SCHEMAS, run_tool
 
 SYSTEM_PROMPT = """You are lindwyrm, a command-line coding assistant. You help \
@@ -143,6 +144,13 @@ class Agent:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.messages: list[dict] = []
+        # Built once: the system prompt is the cacheable prefix of every
+        # request, so it must not shift between turns.
+        extra, self.context_files = load_project_context(
+            cfg.project_root,
+            explicit=getattr(cfg, "context_file", None),
+            user_dir=getattr(cfg, "user_context_dir", None))
+        self.system_prompt = SYSTEM_PROMPT + extra
         # Input tokens the API reported for the most recent request; this is
         # what the next request will cost before anything new is added.
         self.last_input_tokens: int = 0
@@ -162,7 +170,7 @@ class Agent:
         """Best available measure of how much context the history occupies."""
         if self.last_input_tokens > 0:
             return self.last_input_tokens
-        return estimate_tokens(self.messages, SYSTEM_PROMPT)
+        return estimate_tokens(self.messages, self.system_prompt)
 
     def context_fraction(self) -> float:
         limit = max(1, self.cfg.context_limit)
@@ -251,7 +259,7 @@ class Agent:
                 count += 1
 
         if count:
-            self.last_input_tokens = estimate_tokens(self.messages, SYSTEM_PROMPT)
+            self.last_input_tokens = estimate_tokens(self.messages, self.system_prompt)
         return count, freed
 
     # -- compaction ---------------------------------------------------------
@@ -311,7 +319,7 @@ class Agent:
 
         # The old count describes history that no longer exists; re-estimate so
         # the next should_compact() isn't answered with a stale number.
-        self.last_input_tokens = estimate_tokens(self.messages, SYSTEM_PROMPT)
+        self.last_input_tokens = estimate_tokens(self.messages, self.system_prompt)
         after = self.last_input_tokens
         saved = max(0, before - after)
         return True, f"compacted {cut} message(s), ~{saved} tokens freed"
@@ -347,7 +355,7 @@ class Agent:
                         on_notice(note)
 
             handler: StreamHandler = self._call_model(
-                self.messages, SYSTEM_PROMPT, TOOL_SCHEMAS,
+                self.messages, self.system_prompt, TOOL_SCHEMAS,
                 on_text=on_text, on_thinking=on_thinking, on_retry=on_retry,
             )
             if handler.input_tokens:

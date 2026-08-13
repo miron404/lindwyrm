@@ -12,6 +12,13 @@ for markdown rendering). You can read all of it in an afternoon.
 
 ## What it does
 
+- **Project instructions**: drop an `AGENTS.md` in the repo root (or run
+  `/init` for a starter) and every session begins knowing your build commands,
+  conventions and gotchas instead of rediscovering them. A personal
+  `~/.config/lindwyrm/AGENTS.md` applies everywhere. Both are loaded as
+  reference material, explicitly not as instructions that outrank you — a file
+  that arrives with someone else's clone shouldn't be able to give orders to an
+  agent that can run commands.
 - **Presets**: DeepSeek Flash/Pro ship built in (`flash`/`pro`). Add your own
   via `[[presets]]` in config to point at any other provider -- each preset
   bundles a wire format (`anthropic` or `openai`), `base_url`, `model`, and
@@ -101,8 +108,9 @@ Slash commands in the REPL: `/model <name>` (switch preset), `/presets` (list
 them), `/thinking on|off`, `/think peek|show|hide` (or `/think` to reprint last
 reasoning), `/markdown on|off`, `/perm <path> read=.. write=.. delete=..` (set
 per-path rules; `reset` clears; no args shows the table), `/policy`,
-`/context` (how full the window is), `/compact` (summarize history now),
-`/proxy` (show the proxy in use), `/clear`, `/help`, `/exit`.
+`/context` (how full the window is), `/compact [instructions]` (compact now),
+`/init` (write a starter `AGENTS.md`), `/proxy` (show the proxy in use),
+`/clear`, `/help`, `/exit`.
 
 When the agent wants to write, delete, or run a command, you'll see a prompt:
 
@@ -114,6 +122,37 @@ When the agent wants to write, delete, or run a command, you'll see a prompt:
 ```
 
 `always` grants that operation for the rest of the current user turn only.
+
+## Project instructions
+
+`AGENTS.md` in the project root is read at the start of every session and
+prepended to the system prompt. `/init` writes a commented starter template.
+Keep it short and factual — it costs tokens on every single turn:
+
+```markdown
+## Commands
+```bash
+python -m unittest discover -s tests   # tests
+ruff check .                           # lint
+```
+
+## Conventions
+- stdlib `unittest`; never add pytest (zero test dependencies is a hard rule)
+- line length 88
+
+## Gotchas
+- `packaging/lwyrm/` version is stamped by CI; don't hand-edit it
+```
+
+Rules of thumb: write down anything you catch yourself repeating in chat, and
+leave out anything the agent can discover in two seconds by looking. Commands
+belong here verbatim so they aren't guessed. So do decisions it cannot infer
+from the code — "we chose X over Y because Z" stops it from helpfully
+reintroducing Y.
+
+`LINDWYRM.md` takes precedence if you want notes specific to this agent, and
+`~/.config/lindwyrm/AGENTS.md` holds preferences that follow you across
+projects. `context_file` in config points somewhere else entirely.
 
 ## Configure
 

@@ -390,6 +390,10 @@ class Config:
     offload_threshold_tokens: int = 1_000   # worth moving once out of the zone
     offload_eager_tokens: int = 8_000       # so big it goes the moment it appears
 
+    # Path to the project instructions file. Unset means look for
+    # LINDWYRM.md then AGENTS.md in the project root.
+    context_file: str | None = None
+
     preset_name: str = DEFAULT_PRESET
     presets: dict = field(default_factory=dict)  # name -> Preset, for switching
     extra_body: dict = field(default_factory=dict)
@@ -557,6 +561,7 @@ def load_config(
         offload=bool(data.get("offload", True)),
         offload_threshold_tokens=max(1, int(data.get("offload_threshold_tokens", 1_000))),
         offload_eager_tokens=max(1, int(data.get("offload_eager_tokens", 8_000))),
+        context_file=data.get("context_file"),
         preset_name=preset.name,
         presets=presets,
         extra_body=dict(preset.extra_body),

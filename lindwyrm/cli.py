@@ -23,6 +23,7 @@ Slash commands inside the REPL:
                                 (levels: allow|confirm|deny; "reset" clears;
                                  no args shows the table; path alone shows it)
     /policy                     show current permissions
+    /init                       write a starter AGENTS.md for this project
     /proxy                      show the proxy in use for this preset
     /context                    show how full the context window is
     /compact [instructions]     compact now; optional focus, e.g.
@@ -42,6 +43,7 @@ from .agent import Agent
 from .config import Config, load_config, mask_proxy, parse_proxy
 from .http import APIError, close_client
 from .offload import get_store
+from .project import CONTEXT_FILENAMES, TEMPLATE, find_context_file
 from .render import Renderer, _HAS_RICH
 from .sandbox import UserQuit, reset_session_grants
 
@@ -72,7 +74,7 @@ RESET = "\033[0m"
 BASH_OUTPUT_LINES = 25
 
 
-def _banner(cfg: Config) -> None:
+def _banner(cfg: Config, agent=None) -> None:
     print(f"{BOLD}lindwyrm{RESET} {DIM}- coding agent{RESET}")
     print(f"  preset:   {CYAN}{cfg.preset_name}{RESET} {DIM}({cfg.format}, {cfg.model}){RESET}")
     print(f"  thinking: {'on' if cfg.thinking else 'off'}")
@@ -83,6 +85,10 @@ def _banner(cfg: Config) -> None:
         print(f"  {DIM}{len(p.rules)} path rule(s) — see /policy{RESET}")
     if cfg.proxy:
         print(f"  proxy:    {CYAN}{mask_proxy(cfg.proxy)}{RESET}")
+    if agent is not None and agent.context_files:
+        # Worth surfacing: these files steer the agent, and on a cloned repo
+        # you did not write them.
+        print(f"  context:  {CYAN}{', '.join(agent.context_files)}{RESET}")
     if cfg.policy.read_only:
         print(f"  {YELLOW}read-only mode{RESET}")
     print(f"  {DIM}/help for commands, /exit to quit{RESET}\n")
@@ -109,6 +115,24 @@ def _print_policy(cfg: Config) -> None:
             print(f"    {disp}: {' '.join(parts) if parts else '(no overrides)'}")
     else:
         print("  (no path rules)")
+
+
+def _init_context_file(cfg: Config) -> None:
+    """Write a starter project instructions file, never over an existing one."""
+    existing = find_context_file(cfg.project_root)
+    if existing:
+        print(f"  {YELLOW}{existing.name} already exists{RESET} "
+              f"{DIM}({existing}){RESET}")
+        print(f"  {DIM}edit it directly; /init won't overwrite your notes{RESET}")
+        return
+    target = cfg.project_root / CONTEXT_FILENAMES[-1]  # AGENTS.md
+    try:
+        target.write_text(TEMPLATE, encoding="utf-8")
+    except OSError as e:
+        print(f"  {RED}could not write {target}:{RESET} {e}")
+        return
+    print(f"  {GREEN}created {target.name}{RESET} {DIM}({target}){RESET}")
+    print(f"  {DIM}fill it in, then restart the session to load it{RESET}")
 
 
 def _print_proxy(cfg: Config) -> None:
@@ -141,6 +165,8 @@ def _print_context(cfg: Config, agent) -> None:
         # Worth surfacing: a sudden drop means something upstream of the
         # history changed and broke the cacheable prefix.
         print(f"  {DIM}served from cache: {agent.total_cache_read_tokens:,} input tokens{RESET}")
+    if agent.context_files:
+        print(f"  {DIM}project context: {', '.join(agent.context_files)}{RESET}")
     store = get_store()
     if len(store):
         print(f"  {DIM}offloaded: {len(store)} result(s), "
@@ -279,8 +305,8 @@ PROMPT = _make_prompt()
 
 def run_repl(cfg: Config) -> None:
     _setup_history()
-    _banner(cfg)
     agent = Agent(cfg)
+    _banner(cfg, agent)
     renderer = Renderer(
         thinking_mode=cfg.thinking_display,
         enabled=cfg.markdown,
@@ -383,6 +409,8 @@ def _handle_command(line: str, cfg: Config, agent: Agent, renderer: Renderer) ->
         _perm_command(cfg, parts[1:])
     elif cmd == "/policy":
         _print_policy(cfg)
+    elif cmd == "/init":
+        _init_context_file(cfg)
     elif cmd == "/proxy":
         _print_proxy(cfg)
     elif cmd == "/context":
