@@ -149,6 +149,81 @@ class TestClientPool(unittest.TestCase):
             self.assertGreater(len(client._mounts), 0)
 
 
+class TestLoopbackBypass(unittest.TestCase):
+    """A proxy resolves "localhost" on its own side, so proxying a local model
+    server would send the request to someone else's machine entirely."""
+
+    def test_loopback_names_and_addresses_always_bypass(self):
+        for host in ("localhost", "LOCALHOST", "app.localhost",
+                     "127.0.0.1", "127.1.2.3", "::1"):
+            self.assertTrue(lw_http.host_bypasses_proxy(host), host)
+
+    def test_public_hosts_do_not_bypass(self):
+        for host in ("api.deepseek.com", "8.8.8.8", "notlocalhost.com",
+                     "localhost.evil.com"):
+            self.assertFalse(lw_http.host_bypasses_proxy(host), host)
+
+    def test_url_for_local_model_goes_direct_despite_a_proxy(self):
+        self.assertEqual(
+            lw_http.proxy_for_url("http://localhost:11434/v1/chat/completions",
+                                  "socks5h://127.0.0.1:1080"),
+            PROXY_DIRECT)
+
+    def test_remote_url_still_uses_the_proxy(self):
+        self.assertEqual(
+            lw_http.proxy_for_url("https://api.deepseek.com/v1/messages",
+                                  "socks5h://127.0.0.1:1080"),
+            "socks5h://127.0.0.1:1080")
+
+    def test_no_proxy_at_all_stays_direct(self):
+        self.assertEqual(
+            lw_http.proxy_for_url("https://api.deepseek.com", PROXY_DIRECT),
+            PROXY_DIRECT)
+
+    def test_loopback_bypasses_system_proxy_too(self):
+        self.assertEqual(
+            lw_http.proxy_for_url("http://127.0.0.1:11434", PROXY_SYSTEM),
+            PROXY_DIRECT)
+
+
+class TestNoProxyList(unittest.TestCase):
+    def test_exact_host(self):
+        self.assertTrue(
+            lw_http.host_bypasses_proxy("ollama.box", ["ollama.box"]))
+
+    def test_domain_suffix_matches_subdomains(self):
+        for entry in (".internal", "internal"):
+            self.assertTrue(
+                lw_http.host_bypasses_proxy("gpu.internal", [entry]), entry)
+        self.assertFalse(
+            lw_http.host_bypasses_proxy("notinternal", [".internal"]))
+
+    def test_cidr_range(self):
+        self.assertTrue(
+            lw_http.host_bypasses_proxy("192.168.1.50", ["192.168.0.0/16"]))
+        self.assertFalse(
+            lw_http.host_bypasses_proxy("10.1.1.1", ["192.168.0.0/16"]))
+
+    def test_hostname_never_matches_a_cidr(self):
+        self.assertFalse(
+            lw_http.host_bypasses_proxy("example.com", ["10.0.0.0/8"]))
+
+    def test_wildcard_bypasses_everything(self):
+        self.assertTrue(lw_http.host_bypasses_proxy("api.deepseek.com", ["*"]))
+
+    def test_malformed_entries_are_skipped_not_fatal(self):
+        self.assertFalse(
+            lw_http.host_bypasses_proxy("api.deepseek.com",
+                                        ["", "  ", "999.999/x", "not a cidr/"]))
+
+    def test_lan_model_server_goes_direct(self):
+        self.assertEqual(
+            lw_http.proxy_for_url("http://192.168.1.50:11434/v1",
+                                  "socks5h://127.0.0.1:1080",
+                                  ["192.168.0.0/16"]),
+            PROXY_DIRECT)
+
+
 class TestMasking(unittest.TestCase):
     def test_password_is_hidden(self):
         got = mask_proxy("socks5h://bob:hunter2@host:1080")

@@ -237,6 +237,7 @@ def stream_message(
 
     for _event, data in stream_sse(url, _headers(cfg), body,
                                    proxy=cfg.proxy,
+                                       no_proxy=cfg.no_proxy,
                                    max_attempts=cfg.max_retries,
                                    on_retry=on_retry):
         if "error" in data:

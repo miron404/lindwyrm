@@ -158,6 +158,16 @@ base_url = "http://localhost:11434/v1"
 proxy = false                        # ...except this one, which goes direct
 ```
 
+`localhost` and `127.0.0.0/8` are always reached directly, including under
+`--proxy`, which otherwise overrides everything — a proxy resolves `localhost`
+on its own side, so proxying a local model server would send the request to a
+stranger's machine rather than yours. For a model server elsewhere on the LAN,
+list it (exact host, domain suffix or CIDR):
+
+```toml
+no_proxy = ["192.168.0.0/16", ".internal", "ollama.box"]
+```
+
 `proxy = "system"` opts back in to `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`.
 `socks5h://` and `socks5://` behave the same: httpx passes the hostname to the
 proxy, so DNS is resolved on the proxy side either way.

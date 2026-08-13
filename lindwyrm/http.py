@@ -20,10 +20,12 @@ error propagates instead.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import random
 import time
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Sequence
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -111,6 +113,7 @@ def stream_sse(
     body: dict[str, Any],
     *,
     proxy: str = PROXY_DIRECT,
+    no_proxy: Sequence[str] = (),
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     sleep: Callable[[float], None] | None = None,
     on_retry: Callable[[int, str, float], None] | None = None,
@@ -127,6 +130,8 @@ def stream_sse(
     # time.sleep at import time and make the delay unpatchable.
     if sleep is None:
         sleep = time.sleep
+    # Exempt hosts fall back to a direct client, which the pool reuses.
+    proxy = proxy_for_url(url, proxy, no_proxy)
     client = get_client(proxy)
     last_error: str = "unknown error"
 
@@ -160,6 +165,57 @@ def stream_sse(
             sleep(delay)
 
     raise APIError(f"Giving up after {max_attempts} attempts ({last_error}).")
+
+
+def host_bypasses_proxy(host: str, no_proxy: Sequence[str] = ()) -> bool:
+    """True if `host` must be reached directly, never through a proxy.
+
+    Loopback always bypasses, with no way to turn it off: a SOCKS or HTTP
+    proxy resolves "localhost" on ITS OWN side, so proxying a local model
+    server wouldn't reach your machine -- it would send the request to a
+    stranger's loopback. `no_proxy` adds hosts, domain suffixes and CIDR
+    ranges on top, for a model server on the LAN.
+    """
+    host = (host or "").strip().strip("[]").lower()
+    if not host:
+        return False
+
+    try:
+        if ipaddress.ip_address(host).is_loopback:
+            return True
+    except ValueError:
+        if host == "localhost" or host.endswith(".localhost"):
+            return True
+
+    for raw in no_proxy:
+        entry = (raw or "").strip().lower()
+        if not entry:
+            continue
+        if entry == "*":
+            return True
+        if "/" in entry:
+            try:
+                network = ipaddress.ip_network(entry, strict=False)
+            except ValueError:
+                continue
+            try:
+                if ipaddress.ip_address(host) in network:
+                    return True
+            except ValueError:
+                pass  # a hostname can't match a CIDR range
+            continue
+        entry = entry.lstrip(".")
+        if host == entry or host.endswith("." + entry):
+            return True
+    return False
+
+
+def proxy_for_url(url: str, proxy: str, no_proxy: Sequence[str] = ()) -> str:
+    """The proxy to actually use for `url` -- direct if the host is exempt."""
+    if not proxy:
+        return PROXY_DIRECT
+    host = urlsplit(url).hostname or ""
+    return PROXY_DIRECT if host_bypasses_proxy(host, no_proxy) else proxy
 
 
 def _redact(message: str, proxy: str) -> str:

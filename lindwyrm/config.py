@@ -387,6 +387,9 @@ class Config:
     # Set by --proxy: outranks both the preset and the global setting, and
     # survives /model, which a plain global default would not.
     proxy_override: str | None = None
+    # Extra hosts that always go direct. Loopback is exempt unconditionally
+    # and is not listed here; this is for a model server on the LAN.
+    no_proxy: tuple[str, ...] = ()
 
     def with_preset(self, name: str) -> "Config":
         """Switch to a different preset by name/alias, re-resolving its API key.
@@ -499,6 +502,10 @@ def load_config(
     policy = _build_policy(data, root)
     global_key_file = data.get("key_file")
     global_proxy = parse_proxy(data["proxy"], "proxy") if "proxy" in data else PROXY_DIRECT
+    raw_no_proxy = data.get("no_proxy", [])
+    if isinstance(raw_no_proxy, str):
+        raw_no_proxy = [raw_no_proxy]
+    no_proxy = tuple(str(h).strip() for h in raw_no_proxy if str(h).strip())
 
     # Which preset to start on: default_preset (new), else legacy `model` key
     # (may be "flash"/"pro"/a preset name/a bare model id), else deepseek-flash.
@@ -524,6 +531,7 @@ def load_config(
             "max_completion_tokens", preset.max_completion_tokens)),
         proxy=preset.proxy if preset.proxy is not None else global_proxy,
         global_proxy=global_proxy,
+        no_proxy=no_proxy,
         project_root=root,
         policy=policy,
         audit_log=Path(os.path.expanduser(data["audit_log"])) if data.get("audit_log") else None,

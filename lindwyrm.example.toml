@@ -52,6 +52,12 @@ default_preset = "flash"
 # to the proxy either way, so DNS is always resolved on the proxy side.
 # Set it per-preset below to override this, or to false to bypass it.
 # proxy = "socks5h://127.0.0.1:1080"
+#
+# localhost and 127.0.0.0/8 are ALWAYS reached directly and can't be proxied:
+# a proxy resolves "localhost" on its own side, so a proxied request meant for
+# your local model server would land on someone else's machine. Add hosts here
+# for a model server elsewhere on the LAN -- exact host, domain suffix or CIDR:
+# no_proxy = ["192.168.0.0/16", ".internal", "ollama.box"]
 
 markdown = true            # render answers as Markdown via rich (false = plain)
 thinking_display = "peek"  # how to show reasoning: "peek" | "show" | "hide"
