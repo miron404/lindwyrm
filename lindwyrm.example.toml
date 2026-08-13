@@ -111,6 +111,17 @@ thinking_display = "peek"  # how to show reasoning: "peek" | "show" | "hide"
 #                                          # support DeepSeek-style thinking
 # max_tokens = 8192
 # context_limit = 128000                  # this model's window, for compaction
+#
+# Prices, per MILLION tokens, in whatever currency your provider bills you.
+# Nothing ships with prices filled in: they change, and a stale number is
+# worse than none. Setting any of them turns on the spend line after each
+# turn and the breakdown in /context.
+# price_input = 0.28                      # fresh (uncached) input
+# price_cache_read = 0.028                # usually a fraction of the above
+# price_cache_write = 0.35                # usually MORE than fresh input
+# price_output = 0.42
+#   An unset cache price falls back to price_input, which overstates rather
+#   than quietly billing part of the context at zero.
 # proxy = "socks5h://127.0.0.1:1080"      # this provider only; false = go direct
 #                                          # even when a global proxy is set
 # max_completion_tokens = false           # send "max_completion_tokens" instead

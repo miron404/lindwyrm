@@ -158,6 +158,13 @@ class Preset:
     max_completion_tokens: bool = False
     # None means "inherit the global setting"; see PROXY_DIRECT / PROXY_SYSTEM.
     proxy: str | None = None
+    # Prices in currency units per MILLION tokens, the unit providers quote.
+    # Left unset: no numbers are invented, and cost display stays off until
+    # you fill in what your provider actually charges you.
+    price_input: float | None = None
+    price_output: float | None = None
+    price_cache_read: float | None = None
+    price_cache_write: float | None = None
     # Extra top-level fields merged into every request body verbatim (e.g. a
     # provider-specific flag). Rarely needed.
     extra_body: dict = field(default_factory=dict)
@@ -238,6 +245,12 @@ def _build_presets(data: dict) -> dict[str, Preset]:
                 "max_completion_tokens", base.max_completion_tokens if base else False)),
             proxy=(parse_proxy(entry["proxy"], f"presets.{name}.proxy")
                    if "proxy" in entry else (base.proxy if base else None)),
+            price_input=entry.get("price_input", base.price_input if base else None),
+            price_output=entry.get("price_output", base.price_output if base else None),
+            price_cache_read=entry.get("price_cache_read",
+                                       base.price_cache_read if base else None),
+            price_cache_write=entry.get("price_cache_write",
+                                        base.price_cache_write if base else None),
             extra_body=dict(entry.get("extra_body", base.extra_body if base else {})),
         )
     return presets
@@ -362,6 +375,11 @@ class Config:
     max_completion_tokens: bool = False
     # Resolved proxy: "" = direct, "system" = use env vars, else a proxy URL.
     proxy: str = PROXY_DIRECT
+    # Per-million-token prices for the active preset; None = don't show cost.
+    price_input: float | None = None
+    price_output: float | None = None
+    price_cache_read: float | None = None
+    price_cache_write: float | None = None
     project_root: Path = field(default_factory=Path.cwd)
     policy: Policy = field(default_factory=Policy)
     audit_log: Path | None = None
@@ -432,6 +450,10 @@ class Config:
             context_limit=preset.context_limit,
             max_completion_tokens=preset.max_completion_tokens,
             proxy=self.resolve_proxy(preset),
+            price_input=preset.price_input,
+            price_output=preset.price_output,
+            price_cache_read=preset.price_cache_read,
+            price_cache_write=preset.price_cache_write,
             extra_body=dict(preset.extra_body),
         )
 
@@ -546,6 +568,10 @@ def load_config(
             "max_completion_tokens", preset.max_completion_tokens)),
         proxy=preset.proxy if preset.proxy is not None else global_proxy,
         global_proxy=global_proxy,
+        price_input=preset.price_input,
+        price_output=preset.price_output,
+        price_cache_read=preset.price_cache_read,
+        price_cache_write=preset.price_cache_write,
         no_proxy=no_proxy,
         project_root=root,
         policy=policy,

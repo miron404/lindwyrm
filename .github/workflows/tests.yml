@@ -1,0 +1,35 @@
+name: Tests
+
+# Runs on every push and pull request, and is also called by publish.yml so a
+# release cannot go out on a red suite.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_call:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # requires-python is >=3.11; test the ends of that range.
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # The socks extra is needed by the suite, not just at runtime:
+      # parse_proxy validates socks5:// URLs by importing socksio, and the
+      # proxy tests exercise exactly that path.
+      - name: Install
+        run: python -m pip install -e '.[socks]'
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v

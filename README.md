@@ -239,6 +239,25 @@ proxy, so DNS is resolved on the proxy side either way.
   offloaded result is a *snapshot*: the file may have changed since, which is
   exactly why it is copied rather than re-read on demand.
 
+## Cost
+
+Add prices to a preset and lindwyrm keeps a running total: a dim line after
+each turn, and a breakdown in `/context`. Prices are per million tokens:
+
+```toml
+[[presets]]
+name = "flash"
+price_input = 0.28        # fresh input
+price_cache_read = 0.028  # cached input, usually far cheaper
+price_output = 0.42
+```
+
+Cache reads, cache writes and fresh input are counted separately, because
+they are billed separately — on a typical session most of the input is served
+from cache, and lumping them together would overstate the bill several times
+over. No prices ship built in: they change, and a stale number is worse than
+none.
+
 ## Tests
 
 ```bash

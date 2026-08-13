@@ -164,7 +164,11 @@ def _print_context(cfg: Config, agent) -> None:
     if agent.total_cache_read_tokens:
         # Worth surfacing: a sudden drop means something upstream of the
         # history changed and broke the cacheable prefix.
-        print(f"  {DIM}served from cache: {agent.total_cache_read_tokens:,} input tokens{RESET}")
+        billed = agent.total_fresh_input_tokens + agent.total_cache_read_tokens
+        share = agent.total_cache_read_tokens / max(1, billed) * 100
+        print(f"  {DIM}served from cache: {agent.total_cache_read_tokens:,} input "
+              f"tokens ({share:.0f}% of input){RESET}")
+    _print_cost(cfg, agent)
     if agent.context_files:
         print(f"  {DIM}project context: {', '.join(agent.context_files)}{RESET}")
     store = get_store()
@@ -175,6 +179,38 @@ def _print_context(cfg: Config, agent) -> None:
         print(f"  {DIM}auto-compacts at {cfg.compact_threshold * 100:.0f}%{RESET}")
     else:
         print(f"  {DIM}auto-compaction off — use /compact{RESET}")
+
+
+def _print_cost(cfg: Config, agent) -> None:
+    """Session spend, when the active preset has prices configured."""
+    cost = agent.session_cost()
+    if cost is None:
+        return
+    print(f"  {BOLD}spend{RESET}   {_money(cost)} {DIM}this session{RESET}")
+    print(f"  {DIM}  fresh in {agent.total_fresh_input_tokens:,} · "
+          f"cached in {agent.total_cache_read_tokens:,} · "
+          f"cache writes {agent.total_cache_write_tokens:,} · "
+          f"out {agent.total_output_tokens:,}{RESET}")
+
+
+def _money(value: float) -> str:
+    """Small amounts need more decimals than a currency format allows."""
+    if value >= 1:
+        return f"{value:.2f}"
+    if value >= 0.01:
+        return f"{value:.4f}"
+    return f"{value:.6f}"
+
+
+def _turn_summary(cfg: Config, agent, before: float | None) -> None:
+    """One dim line after each turn -- only once prices are configured, since
+    setting them is the signal that you want to watch the meter."""
+    cost = agent.session_cost()
+    if cost is None:
+        return
+    delta = cost - (before or 0.0)
+    print(f"{DIM}  {_money(delta)} this turn · {_money(cost)} session · "
+          f"{agent.context_fraction() * 100:.0f}% context{RESET}")
 
 
 def _make_retry_printer():
@@ -352,6 +388,7 @@ def _do_turn(cfg: Config, agent: Agent, renderer: Renderer) -> None:
     renderer.enabled = cfg.markdown and _HAS_RICH
     renderer.begin_turn()
     on_tool_result = make_tool_result_printer(renderer)
+    cost_before = agent.session_cost()
     try:
         _emit(f"[dim]{cfg.model}[/dim]" if _console else cfg.model)
         agent.run_turn(
@@ -363,6 +400,7 @@ def _do_turn(cfg: Config, agent: Agent, renderer: Renderer) -> None:
             on_notice=lambda msg: print(f"  {DIM}{msg}{RESET}"),
         )
         renderer.end_turn()
+        _turn_summary(cfg, agent, cost_before)
     except UserQuit:
         # The user chose [q]uit at a confirmation prompt: stop the turn, but
         # stay in the REPL rather than tearing the session down.
@@ -517,6 +555,7 @@ PRESET_FIELDS = (
     "preset_name", "format", "base_url", "model", "api_key",
     "thinking", "max_tokens", "thinking_budget", "temperature",
     "context_limit", "max_completion_tokens", "proxy", "extra_body",
+    "price_input", "price_output", "price_cache_read", "price_cache_write",
 )
 
 

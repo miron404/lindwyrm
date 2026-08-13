@@ -156,6 +156,10 @@ class Agent:
         self.last_input_tokens: int = 0
         self.total_output_tokens: int = 0
         self.total_cache_read_tokens: int = 0
+        # Billed separately from cache reads: a cache write typically costs
+        # MORE than fresh input, a read far less.
+        self.total_cache_write_tokens: int = 0
+        self.total_fresh_input_tokens: int = 0
         # tool_use_id -> "read_file src/foo.py", for labelling offload stubs.
         # Kept beside the history rather than inside the blocks: an unknown
         # field in a tool_result block would go out over the wire.
@@ -203,6 +207,36 @@ class Agent:
         send = openai_client.stream_message if cfg.format == "openai" else stream_message
         return send(cfg, messages, system, tools,
                     on_text=on_text, on_thinking=on_thinking, on_retry=on_retry)
+
+    def has_prices(self) -> bool:
+        return any(getattr(self.cfg, f, None) is not None
+                   for f in ("price_input", "price_output",
+                             "price_cache_read", "price_cache_write"))
+
+    def session_cost(self) -> float | None:
+        """Spend so far, or None when no prices are configured.
+
+        Prices are per million tokens, the unit providers quote. A price left
+        unset falls back to the plain input price for the cache tiers, which
+        is the conservative reading -- better to overstate than to quietly
+        bill part of the context at zero.
+        """
+        if not self.has_prices():
+            return None
+        p_in = self.cfg.price_input or 0.0
+        p_out = self.cfg.price_output or 0.0
+        p_read = self.cfg.price_cache_read
+        p_write = self.cfg.price_cache_write
+        if p_read is None:
+            p_read = p_in
+        if p_write is None:
+            p_write = p_in
+        return (
+            self.total_fresh_input_tokens * p_in
+            + self.total_cache_read_tokens * p_read
+            + self.total_cache_write_tokens * p_write
+            + self.total_output_tokens * p_out
+        ) / 1_000_000
 
     # -- offloading ---------------------------------------------------------
 
@@ -361,7 +395,14 @@ class Agent:
             if handler.input_tokens:
                 self.last_input_tokens = handler.input_tokens
             self.total_output_tokens += handler.output_tokens
-            self.total_cache_read_tokens += getattr(handler, "cache_read_tokens", 0)
+            cache_read = getattr(handler, "cache_read_tokens", 0)
+            cache_write = getattr(handler, "cache_write_tokens", 0)
+            self.total_cache_read_tokens += cache_read
+            self.total_cache_write_tokens += cache_write
+            # input_tokens is the whole context; the cached parts are priced
+            # differently, so what's left is what was billed as fresh input.
+            self.total_fresh_input_tokens += max(
+                0, handler.input_tokens - cache_read - cache_write)
 
             # Echo assistant content back verbatim (keeps thinking blocks).
             self.messages.append({"role": "assistant", "content": handler.content})

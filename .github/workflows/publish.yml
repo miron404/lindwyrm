@@ -14,7 +14,13 @@ on:
   workflow_dispatch:
 
 jobs:
+  # A release must not go out on a red suite. Reused rather than duplicated,
+  # so the release runs exactly the tests that guard every push.
+  test:
+    uses: ./.github/workflows/tests.yml
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

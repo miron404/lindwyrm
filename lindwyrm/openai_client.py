@@ -154,6 +154,8 @@ class OpenAIStreamHandler:
         self.input_tokens: int = 0
         self.output_tokens: int = 0
         self.cache_read_tokens: int = 0
+        # OpenAI's shape has no cache-write concept; left at 0.
+        self.cache_write_tokens: int = 0
         self._text = ""
         self._tool_calls: dict[int, dict] = {}  # index -> {id, name, args}
 
