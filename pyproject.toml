@@ -2,11 +2,25 @@
 name = "lindwyrm"
 version = "0.1.0"
 description = "A minimal, dependency-light CLI coding agent for any Anthropic- or OpenAI-compatible provider"
+readme = "README.md"
 requires-python = ">=3.11"
+keywords = ["cli", "coding-agent", "llm", "anthropic", "openai", "deepseek"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Code Generators",
+]
 dependencies = [
     "httpx>=0.27",
     "rich>=13.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/miron404/lindwyrm"
+Source = "https://github.com/miron404/lindwyrm"
+Issues = "https://github.com/miron404/lindwyrm/issues"
 
 [project.scripts]
 lwyrm = "lindwyrm.cli:main"

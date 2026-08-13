@@ -50,9 +50,18 @@ for markdown rendering). You can read all of it in an afternoon.
 ## Install
 
 ```bash
-cd lindwyrm
-pip install -e .          # installs the `lwyrm` command (and `lindwyrm` as an alias)
+pip install lindwyrm       # installs the `lwyrm` command (and `lindwyrm` as an alias)
 export DEEPSEEK_API_KEY=sk-...
+```
+
+`pip install lwyrm` works too — it's an alias package that pulls in the same
+thing, for when you reach for the command's name first.
+
+From a checkout instead:
+
+```bash
+git clone https://github.com/miron404/lindwyrm && cd lindwyrm
+pip install -e .
 ```
 
 (Requires Python 3.11+.)
@@ -131,3 +140,18 @@ read = "deny"
   you confirm yourself.
 - No context-window management yet: very long sessions will eventually hit the
   model's limit. Use `/clear` between tasks.
+
+## Releasing
+
+Publishing runs on tag push via GitHub Actions using PyPI **Trusted
+Publishing** (OIDC) — no API token is stored in this repo. One tag publishes
+two distributions: `lindwyrm` (the package) and `lwyrm` (an alias metapackage
+that only depends on it, so the name can't be typosquatted).
+
+```bash
+# bump version in pyproject.toml and packaging/lwyrm/pyproject.toml, then:
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+Both `version` fields should be bumped together so the alias keeps pointing at
+a release that exists.
