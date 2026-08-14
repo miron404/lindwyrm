@@ -184,7 +184,8 @@ PRESET_ALIASES = {"flash": "deepseek-flash", "pro": "deepseek-pro"}
 DEFAULT_PRESET = "deepseek-flash"
 
 
-def _resolve_preset_api_key(preset: Preset, global_key_file: str | None) -> str:
+def _resolve_preset_api_key(preset: Preset, global_key_file: str | None,
+                            required: bool = True) -> str:
     for env_name in preset.api_key_env:
         val = os.environ.get(env_name)
         if val:
@@ -194,6 +195,10 @@ def _resolve_preset_api_key(preset: Preset, global_key_file: str | None) -> str:
         p = Path(os.path.expanduser(key_file))
         if p.is_file():
             return p.read_text(encoding="utf-8").strip()
+    if not required:
+        # Some commands only touch local files and have no business demanding
+        # credentials -- /init writing a template shouldn't need an API key.
+        return ""
     tried = ", ".join(preset.api_key_env) if preset.api_key_env else "(none configured)"
     raise SystemExit(
         f"No API key found for preset '{preset.name}'. Set one of: {tried}, "
@@ -530,6 +535,7 @@ def load_config(
     model: str | None = None,
     thinking: bool | None = None,
     read_only: bool | None = None,
+    require_key: bool = True,
 ) -> Config:
     root = (project_root or Path.cwd()).resolve()
 
@@ -558,7 +564,7 @@ def load_config(
         # Legacy: `model` was a raw DeepSeek model id, not a preset name.
         preset = replace(BUILTIN_PRESETS[DEFAULT_PRESET], model=start_name)
 
-    api_key = _resolve_preset_api_key(preset, global_key_file)
+    api_key = _resolve_preset_api_key(preset, global_key_file, require_key)
 
     cfg = Config(
         api_key=api_key,

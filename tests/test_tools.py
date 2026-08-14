@@ -1,6 +1,7 @@
 """File tools: editing, searching, and the guards around them."""
 
 import os
+import time
 import tempfile
 import unittest
 from dataclasses import dataclass
@@ -16,8 +17,9 @@ from lindwyrm.tools import (
     tool_delete_file,
     tool_edit_file,
     tool_glob,
-    tool_write_file,
+    tool_bash,
     tool_grep,
+    tool_write_file,
     tool_list_dir,
     tool_read_file,
 )
@@ -271,6 +273,60 @@ class TestBinarySniff(ToolTestCase):
         p = self.root / "b.bin"
         p.write_bytes(b"abc\x00def")
         self.assertTrue(_looks_binary(p))
+
+
+class TestBashStreaming(ToolTestCase):
+    """communicate() returned nothing until the process exited, so a long
+    test run was indistinguishable from a hang."""
+
+    def setUp(self):
+        super().setUp()
+        self.cfg.policy.bash = "allow"
+
+    def test_lines_arrive_before_the_command_finishes(self):
+        seen = []
+        tool_bash(self.cfg, "echo one; sleep 0.4; echo two",
+                  on_output=lambda line: seen.append((time.monotonic(), line)))
+        self.assertEqual([line for _, line in seen], ["one", "two"])
+        # The gap proves the first line was handed over while it still ran.
+        self.assertGreater(seen[1][0] - seen[0][0], 0.2)
+
+    def test_stderr_keeps_its_place_in_the_output(self):
+        """Reading two pipes and concatenating put every error after all the
+        normal output, so an early failure surfaced at the very end."""
+        out = tool_bash(self.cfg, "echo first; echo BOOM >&2; echo third")
+        body = out.splitlines()[1:]
+        self.assertEqual(body, ["first", "BOOM", "third"])
+
+    def test_exit_code_is_reported(self):
+        self.assertIn("exit code: 3", tool_bash(self.cfg, "exit 3"))
+
+    def test_output_is_complete_even_without_a_callback(self):
+        out = tool_bash(self.cfg, "for i in 1 2 3; do echo line $i; done")
+        for n in (1, 2, 3):
+            self.assertIn(f"line {n}", out)
+
+    def test_a_final_line_without_a_newline_still_arrives(self):
+        seen = []
+        tool_bash(self.cfg, "printf 'no trailing newline'",
+                  on_output=seen.append)
+        self.assertEqual(seen, ["no trailing newline"])
+
+    def test_timeout_still_fires_while_streaming(self):
+        """A blocking read would sail straight past the deadline."""
+        started = time.monotonic()
+        with self.assertRaises(SandboxError) as ctx:
+            tool_bash(self.cfg, "sleep 30", timeout=1)
+        self.assertIn("timed out", str(ctx.exception))
+        self.assertLess(time.monotonic() - started, 10)
+
+    def test_no_output_is_reported_as_such(self):
+        self.assertIn("(no output)", tool_bash(self.cfg, "true"))
+
+    def test_read_only_mode_blocks_bash(self):
+        self.cfg.policy.read_only = True
+        with self.assertRaises(SandboxError):
+            tool_bash(self.cfg, "echo hi")
 
 
 class TestListDir(ToolTestCase):

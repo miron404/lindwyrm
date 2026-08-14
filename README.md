@@ -32,7 +32,8 @@ for markdown rendering). You can read all of it in an afternoon.
   there, and some providers reject unknown fields).
 - Tools: `read_file`, `write_file`, `edit_file`, `list_dir`, `glob`, `grep`,
   `delete_file`, `bash` -- work identically no matter which preset/provider
-  is active. `edit_file` requires a unique match by default and names the
+  is active. `bash` streams its output line by line as the command runs, with
+  stdout and stderr interleaved in the order they actually happened. `edit_file` requires a unique match by default and names the
   lines that matched when it isn't unique, or takes `replace_all`. `grep`
   streams files line by line and skips binaries and vendored directories.
 - **Path-based permissions**: every read/write/delete resolves to a level —
@@ -109,6 +110,7 @@ lwyrm -p "add type hints to utils.py"   # one-shot, then exit
 lwyrm --continue         # pick up the last session in this project
 lwyrm --resume <id>      # pick up a specific one (see /sessions)
 lwyrm --no-save          # leave no trace on disk
+lwyrm --init             # write a starter AGENTS.md and exit (no API key needed)
 ```
 
 Slash commands in the REPL: `/model <name>` (switch preset), `/presets` (list

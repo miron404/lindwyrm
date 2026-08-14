@@ -404,6 +404,7 @@ class Agent:
         on_thinking: Callable[[str], None] | None = None,
         on_tool: Callable[[str, dict], None] | None = None,
         on_tool_result: Callable[[str, str, bool], None] | None = None,
+        on_tool_output: Callable[[str], None] | None = None,
         on_retry: Callable[[int, str, float], None] | None = None,
         on_notice: Callable[[str], None] | None = None,
         max_steps: int = 50,
@@ -454,7 +455,8 @@ class Agent:
                 tool_input = tu.get("input", {})
                 if on_tool:
                     on_tool(name, tool_input)
-                result, is_error = run_tool(self.cfg, name, tool_input)
+                result, is_error = run_tool(self.cfg, name, tool_input,
+                                            on_output=on_tool_output)
                 self._tool_labels[tu["id"]] = self.tool_label(name, tool_input)
                 # A single monstrous result (a 200 KB file, a full test log)
                 # can fill the window on its own, so it goes to disk at once

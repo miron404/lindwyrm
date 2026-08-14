@@ -13,8 +13,10 @@ from __future__ import annotations
 import difflib
 import fnmatch
 import os
+import select
 import signal
 import subprocess
+import time
 from pathlib import Path
 
 from .config import Config
@@ -493,7 +495,8 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
             continue
 
 
-def tool_bash(cfg: Config, command: str, timeout: int = 60) -> str:
+def tool_bash(cfg: Config, command: str, timeout: int = 60,
+              on_output=None) -> str:
     if cfg.policy.read_only:
         raise SandboxError("Bash blocked: running in read-only mode.")
     cmd = command.strip()
@@ -511,30 +514,78 @@ def tool_bash(cfg: Config, command: str, timeout: int = 60) -> str:
     # start_new_session puts the command in its own process group so that a
     # timeout or Ctrl+C kills the whole tree. subprocess.run() would only
     # signal the shell itself, leaving its children running in the background.
+    #
+    # stderr is merged into stdout rather than read separately: reading two
+    # pipes and concatenating them afterwards put every error AFTER all the
+    # normal output, so a failure early in a build appeared at the very end.
     proc = subprocess.Popen(
         cmd,
         shell=True,
         cwd=str(cfg.project_root),
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+        stderr=subprocess.STDOUT,
         start_new_session=True,
     )
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
+        out = _stream_output(proc, timeout, on_output)
     except subprocess.TimeoutExpired:
         _kill_process_tree(proc)
-        proc.communicate()
         raise SandboxError(f"Command timed out after {timeout}s.")
     except KeyboardInterrupt:
         _kill_process_tree(proc)
-        proc.communicate()
         raise
-    out = (stdout or "") + (stderr or "")
+
     out = out.strip() or "(no output)"
     if len(out) > 30_000:
         out = out[:30_000] + "\n... (output truncated)"
     return f"exit code: {proc.returncode}\n{out}"
+
+
+def _stream_output(proc: subprocess.Popen, timeout: int,
+                   on_output=None) -> str:
+    """Collect the command's output, handing over each line as it appears.
+
+    communicate() returns nothing until the process exits, so a two-minute
+    test run looked exactly like a hang. Reading through select lets each
+    line reach the screen while the command is still going, and keeps the
+    timeout honest -- a blocking readline would sail straight past it.
+    """
+    collected: list[bytes] = []
+    pending = b""
+    deadline = time.monotonic() + timeout
+    fd = proc.stdout.fileno()
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(proc.args, timeout)
+
+        ready, _, _ = select.select([fd], [], [], min(0.2, remaining))
+        if ready:
+            data = os.read(fd, 65536)
+            if not data:
+                break  # EOF: the command closed its output
+            collected.append(data)
+            if on_output is not None:
+                pending += data
+                while b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                    on_output(line.decode("utf-8", errors="replace"))
+        elif proc.poll() is not None:
+            break  # exited with nothing left to read
+
+    if on_output is not None and pending.strip():
+        on_output(pending.decode("utf-8", errors="replace"))
+
+    try:
+        proc.wait(timeout=max(1, int(deadline - time.monotonic())))
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(proc)
+    try:
+        proc.stdout.close()
+    except OSError:
+        pass
+    return b"".join(collected).decode("utf-8", errors="replace")
 
 
 # Dispatch table.
@@ -551,13 +602,25 @@ TOOL_FUNCS = {
 }
 
 
-def run_tool(cfg: Config, name: str, tool_input: dict) -> tuple[str, bool]:
-    """Run a tool by name. Returns (result_text, is_error)."""
+# Tools that report progress while they run, rather than only at the end.
+STREAMING_TOOLS = frozenset({"bash"})
+
+
+def run_tool(cfg: Config, name: str, tool_input: dict,
+             on_output=None) -> tuple[str, bool]:
+    """Run a tool by name. Returns (result_text, is_error).
+
+    `on_output` receives lines from long-running tools as they appear; the
+    model still gets the complete output in the result either way.
+    """
     func = TOOL_FUNCS.get(name)
     if func is None:
         return f"Unknown tool: {name}", True
     try:
-        result = func(cfg, **tool_input)
+        if on_output is not None and name in STREAMING_TOOLS:
+            result = func(cfg, on_output=on_output, **tool_input)
+        else:
+            result = func(cfg, **tool_input)
         return result, False
     except (UserQuit, KeyboardInterrupt):
         # Leaving the session is the user's decision, not a tool failure --

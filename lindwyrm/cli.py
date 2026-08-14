@@ -262,6 +262,29 @@ def _emit(text: str = "") -> None:
         print(text)
 
 
+def make_tool_output_printer(renderer: Renderer):
+    """Prints a long-running tool's output as it arrives.
+
+    Capped: a chatty build shouldn't scroll the session away. The model still
+    receives everything -- this only bounds what reaches the screen.
+    """
+    state = {"lines": 0}
+
+    def on_output(line: str) -> None:
+        state["lines"] += 1
+        if state["lines"] > BASH_OUTPUT_LINES:
+            if state["lines"] == BASH_OUTPUT_LINES + 1:
+                print(f"  {DIM}… still running; further output hidden "
+                      f"(the model still receives all of it){RESET}")
+            return
+        if renderer.enabled and renderer.console is not None:
+            renderer.console.print(f"  [dim]│[/dim] {_esc(line)}")
+        else:
+            print(f"  │ {line}")
+
+    return on_output
+
+
 def make_tool_result_printer(renderer: Renderer):
     """Build an on_tool_result callback bound to the active renderer's console."""
     out = renderer.console if (renderer.enabled and renderer.console) else None
@@ -278,22 +301,12 @@ def make_tool_result_printer(renderer: Renderer):
         lines = result.splitlines() if result else []
 
         if name == "bash" and lines:
-            head = lines[0]
-            body = lines[1:]
+            # The body already went to the screen line by line while the
+            # command ran; repeating it here would double every build log.
             if out is not None:
-                out.print(f"  [{color}]{tag}[/{color}] [dim]{head}[/dim]")
-                for ln in body[:BASH_OUTPUT_LINES]:
-                    out.print(f"  [dim]│[/dim] {_esc(ln)}")
-                hidden = len(body) - BASH_OUTPUT_LINES
-                if hidden > 0:
-                    out.print(f"  [dim]… {hidden} more line(s) hidden (full output sent to the model)[/dim]")
+                out.print(f"  [{color}]{tag}[/{color}] [dim]{lines[0]}[/dim]")
             else:
-                print(f"  {tag} {head}")
-                for ln in body[:BASH_OUTPUT_LINES]:
-                    print(f"  │ {ln}")
-                hidden = len(body) - BASH_OUTPUT_LINES
-                if hidden > 0:
-                    print(f"  … {hidden} more line(s) hidden (full output sent to the model)")
+                print(f"  {tag} {lines[0]}")
             return
 
         first = lines[0] if lines else ""
@@ -470,6 +483,7 @@ def _do_turn(cfg: Config, agent: Agent, renderer: Renderer) -> None:
             on_thinking=renderer.on_thinking if cfg.thinking else None,
             on_tool=renderer.on_tool,
             on_tool_result=on_tool_result,
+            on_tool_output=make_tool_output_printer(renderer),
             on_retry=_make_retry_printer(),
             on_notice=lambda msg: print(f"  {DIM}{msg}{RESET}"),
         )
@@ -675,6 +689,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-markdown", action="store_true", help="disable rich markdown rendering")
     p.add_argument("-C", "--dir", help="project root (default: cwd)")
     p.add_argument("-p", "--prompt", help="one-shot prompt; run and exit")
+    p.add_argument("--init", action="store_true",
+                   help="write a starter AGENTS.md for this project and exit")
     p.add_argument("-c", "--continue", dest="continue_", action="store_true",
                    help="resume the most recent session for this project")
     p.add_argument("--resume", metavar="ID",
@@ -702,6 +718,10 @@ def main(argv: list[str] | None = None) -> int:
             model=args.model,
             thinking=thinking,
             read_only=True if args.read_only else None,
+            # --init only writes a file; demanding an API key for it would
+            # lock the template behind credentials the user may not have set
+            # up yet -- which is exactly when a starter file is most useful.
+            require_key=not args.init,
         )
     except SystemExit as e:
         print(e, file=sys.stderr)
@@ -719,6 +739,10 @@ def main(argv: list[str] | None = None) -> int:
         except SystemExit as e:
             print(e, file=sys.stderr)
             return 2
+
+    if args.init:
+        _init_context_file(cfg)
+        return 0
 
     if args.no_save:
         cfg.save_sessions = False
