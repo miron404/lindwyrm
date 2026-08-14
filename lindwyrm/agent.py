@@ -36,7 +36,20 @@ Some actions require the user's confirmation and some paths are off-limits by \
 policy. If a tool reports it was blocked or declined, do not retry blindly -- \
 explain to the user what you wanted to do and why, and ask how to proceed.
 
+When you make a git commit, use whatever identity the repository is already \
+configured with. Never pass --author and never set user.name or user.email \
+yourself: those commits go out under someone's name, and it must be the name \
+they chose. If git reports no identity is configured, stop and ask rather \
+than inventing one.
+
 Be concise. When you finish a task, give a short summary of what changed."""
+
+COMMIT_TRAILER_PROMPT = """
+
+When you create a git commit, end the message with a blank line followed by \
+exactly this trailer:
+
+{trailer}"""
 
 SUMMARY_SYSTEM = """You are compacting a coding session's history so work can \
 continue in a smaller context. Write a dense summary that preserves everything \
@@ -61,6 +74,19 @@ SUMMARY_PREFIX = (
 # line or two ("Wrote 412 chars to ..."), where a stub would cost more than
 # the result itself.
 OFFLOADABLE_TOOLS = frozenset({"read_file", "bash", "grep", "glob", "list_dir"})
+
+
+def commit_trailer_prompt(cfg: Config) -> str:
+    """The configured commit trailer, as an instruction, or nothing.
+
+    {model} and {preset} are substituted so the trailer can name which model
+    actually did the work.
+    """
+    trailer = (cfg.commit_trailer or "").strip()
+    if not trailer:
+        return ""
+    trailer = trailer.replace("{model}", cfg.model).replace("{preset}", cfg.preset_name)
+    return COMMIT_TRAILER_PROMPT.format(trailer=trailer)
 
 
 def _audit(cfg: Config, record: dict) -> None:
@@ -145,7 +171,7 @@ class Agent:
             cfg.project_root,
             explicit=cfg.context_file,
             user_dir=cfg.user_context_dir)
-        self.system_prompt = SYSTEM_PROMPT + extra
+        self.system_prompt = SYSTEM_PROMPT + commit_trailer_prompt(cfg) + extra
         # Input tokens the API reported for the most recent request; this is
         # what the next request will cost before anything new is added.
         self.last_input_tokens: int = 0

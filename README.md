@@ -317,6 +317,32 @@ That ~30x gap between a hit and a miss is why the system prompt and tool
 schemas are kept byte-stable across turns: anything that shifts the start of
 the prompt re-charges the whole conversation at miss rates.
 
+## Commits
+
+Commits the agent makes carry whatever identity git is already configured
+with. It is told never to pass `--author` or set `user.name` itself, and to
+stop and ask if the repository has no identity at all — a commit goes out
+under someone's name, and it should be the name they chose.
+
+To mark that a model helped, set a trailer:
+
+```toml
+commit_trailer = "Co-Authored-By: {model} via lindwyrm <noreply@lindwyrm.invalid>"
+```
+
+`{model}` and `{preset}` are substituted, so the trailer records which model
+actually did the work:
+
+```
+Make greet() take a name argument
+
+Co-Authored-By: deepseek-v4-flash via lindwyrm <noreply@lindwyrm.invalid>
+```
+
+There is no default: attributing work to an invented identity isn't something
+to do unasked. GitHub only links a co-author to an account when the address
+is a real one, so pick accordingly.
+
 ## Sessions
 
 Every turn is written to `~/.local/share/lindwyrm/sessions/`, so closing the

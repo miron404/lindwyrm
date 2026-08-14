@@ -105,6 +105,13 @@ default_preset = "flash"
 # save_sessions = true
 # session_retention_days = 30
 
+# Trailer for commits the agent writes. The author line is always whatever
+# git is configured with -- the agent is told never to pass --author or set
+# user.name, and to stop and ask if no identity exists -- so this only marks
+# that a model helped. {model} and {preset} are substituted. Note that GitHub
+# only links a co-author to an account when the address is a real one.
+# commit_trailer = "Co-Authored-By: {model} via lindwyrm <noreply@lindwyrm.invalid>"
+
 markdown = true            # render answers as Markdown via rich (false = plain)
 thinking_display = "peek"  # how to show reasoning: "peek" | "show" | "hide"
                            #   peek = stream live, then vanish when the answer starts
