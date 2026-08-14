@@ -187,10 +187,18 @@ class Agent:
         ceiling = max(1, int(self.cfg.context_limit * 0.25))
         return min(self.cfg.compact_keep_tokens, ceiling)
 
+    def compact_at(self) -> int:
+        """Context size at which reclaiming starts: a share of the window, or
+        the absolute ceiling, whichever comes first."""
+        by_share = int(self.cfg.context_limit * self.cfg.compact_threshold)
+        if self.cfg.compact_max_tokens:
+            return min(by_share, self.cfg.compact_max_tokens)
+        return by_share
+
     def should_compact(self) -> bool:
         if not self.cfg.auto_compact or len(self.messages) < 4:
             return False
-        return self.context_fraction() >= self.cfg.compact_threshold
+        return self.context_tokens() >= self.compact_at()
 
     # -- model call ---------------------------------------------------------
 

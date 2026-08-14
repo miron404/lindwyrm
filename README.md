@@ -174,15 +174,29 @@ shouldn't be able to give orders to an agent that can run commands.
 
 ## Context and cost
 
-Every token of history is re-sent, and re-billed, on every turn — so a long
-session gets expensive well before it reaches the model's limit. lindwyrm
-tracks the token count the API actually reports and, once the window is 75%
-full, reclaims space in two stages:
+Every token of history is re-sent, and re-billed, on every turn. lindwyrm
+tracks the token count the API actually reports and reclaims space at
+whichever comes first: 75% of the window, or 200k tokens.
+
+The ceiling matters because a share of the window stops being a sensible rule
+once windows reach a million tokens. 75% of 1M is 750k, where a turn whose
+cache has gone cold costs around 30x a warm one, prefill takes real time, and
+recall degrades. But reclaiming isn't free either — rewriting history
+re-charges everything after the edit at cache-miss rates, which only pays for
+itself after dozens of turns — so the ceiling sits where a cold turn starts
+to hurt rather than as low as possible.
+
+When the trigger is reached, space is reclaimed in two stages:
 
 1. **Offloading** moves bulky tool results to disk, leaving a short stub the
-   model can expand with `read_offloaded`. Cheap, and reversible.
+   model can expand with `read_offloaded`. Reversible.
 2. **Summarizing** older history, which is lossy, and only if the first stage
    wasn't enough.
+
+Separately, and regardless of how full the window is, a single oversized tool
+result goes to disk the moment it arrives. That case is genuinely free: the
+result is at the very end of the context, so nothing after it needs
+re-caching.
 
 `/context` shows how full the window is and how much input is being served
 from cache; `/compact [instructions]` runs it on demand, optionally told what

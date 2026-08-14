@@ -222,6 +222,55 @@ class TestProtectedZone(unittest.TestCase):
         self.assertEqual(agent.keep_tokens(), 8_000)
 
 
+class TestCompactionTrigger(unittest.TestCase):
+    """When to reclaim. Rewriting history re-charges the invalidated tail at
+    cache-miss rates -- which only pays for itself after dozens of turns --
+    so this has to be late. But a share of the window is the wrong rule once
+    windows reach a million tokens."""
+
+    def trigger(self, **kw):
+        return Agent(make_config(**kw)).compact_at()
+
+    def test_a_share_of_the_window_on_a_small_one(self):
+        self.assertEqual(self.trigger(context_limit=100_000,
+                                      compact_threshold=0.75), 75_000)
+
+    def test_the_ceiling_binds_on_a_huge_window(self):
+        """75% of 1M is 750k, where a cold-cache turn costs ~30x a warm one
+        and recall degrades."""
+        self.assertEqual(self.trigger(context_limit=1_000_000,
+                                      compact_threshold=0.75), 200_000)
+
+    def test_whichever_comes_first(self):
+        self.assertEqual(self.trigger(context_limit=200_000,
+                                      compact_threshold=0.5,
+                                      compact_max_tokens=200_000), 100_000)
+
+    def test_the_ceiling_can_be_switched_off(self):
+        self.assertEqual(self.trigger(context_limit=1_000_000,
+                                      compact_max_tokens=0), 750_000)
+
+    def test_it_fires_at_the_trigger_not_at_the_window(self):
+        agent = Agent(make_config(context_limit=1_000_000))
+        agent.messages = [user_text("x")] * 4
+        agent.last_input_tokens = 199_000
+        self.assertFalse(agent.should_compact())
+        agent.last_input_tokens = 201_000
+        self.assertTrue(agent.should_compact())
+
+    def test_auto_compact_off_never_fires(self):
+        agent = Agent(make_config(auto_compact=False))
+        agent.messages = [user_text("x")] * 4
+        agent.last_input_tokens = 10_000_000
+        self.assertFalse(agent.should_compact())
+
+    def test_a_short_history_is_never_compacted(self):
+        agent = Agent(make_config())
+        agent.messages = [user_text("x")]
+        agent.last_input_tokens = 10_000_000
+        self.assertFalse(agent.should_compact())
+
+
 class TestSweep(unittest.TestCase):
     def test_old_session_directories_are_removed(self):
         with tempfile.TemporaryDirectory() as d:

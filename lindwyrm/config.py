@@ -457,6 +457,14 @@ class Config:
     context_limit: int = 128_000
     auto_compact: bool = True
     compact_threshold: float = 0.75
+    # Hard ceiling on carried context, whatever the window allows. A
+    # percentage alone is the wrong rule once windows reach a million tokens:
+    # 75% of that is 750k, where a turn whose cache has gone cold costs ~30x
+    # a warm one, prefill takes real time, and recall degrades. Rewriting
+    # history is itself expensive -- it re-charges the invalidated tail at
+    # cache-miss rates, which only pays for itself after dozens of turns --
+    # so this is set where a cold turn starts to hurt, not lower. 0 disables.
+    compact_max_tokens: int = 200_000
     compact_keep_last: int = 4  # floor on messages kept verbatim
     # Protected zone, in tokens. A message count alone is a poor measure:
     # four messages can be forty tokens or half the window depending on
@@ -633,6 +641,7 @@ def load_config(
         context_limit=int(data.get("context_limit", preset.context_limit)),
         auto_compact=bool(data.get("auto_compact", True)),
         compact_threshold=float(data.get("compact_threshold", 0.75)),
+        compact_max_tokens=max(0, int(data.get("compact_max_tokens", 200_000))),
         compact_keep_last=max(0, int(data.get("compact_keep_last", 4))),
         compact_keep_tokens=max(0, int(data.get("compact_keep_tokens", 8_000))),
         offload=bool(data.get("offload", True)),

@@ -36,6 +36,16 @@ default_preset = "flash"
 # older history is replaced by a model-written summary and work continues.
 # auto_compact = true
 # compact_threshold = 0.75   # fraction of context_limit that triggers it
+# compact_max_tokens = 200000 # ...but never carry more than this, whatever the
+#                             # window allows. Reclaiming happens at whichever
+#                             # comes first. A share alone is the wrong rule at
+#                             # 1M windows: 75% of that is 750k, where a turn
+#                             # whose cache went cold costs ~30x a warm one and
+#                             # prefill takes real time. Rewriting history is
+#                             # itself costly -- it re-charges the invalidated
+#                             # tail at cache-miss rates and only pays off after
+#                             # dozens of turns -- so this sits where a cold
+#                             # turn starts to hurt, not lower. 0 disables.
 # compact_keep_last = 4      # floor on recent messages kept verbatim
 # compact_keep_tokens = 8000 # protected zone, in TOKENS -- four messages can be
 #                            # forty tokens or half the window depending on

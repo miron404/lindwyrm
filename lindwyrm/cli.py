@@ -181,14 +181,20 @@ def _print_proxy(cfg: Config) -> None:
 def _print_context(cfg: Config, agent) -> None:
     used = agent.context_tokens()
     limit = cfg.context_limit
-    pct = agent.context_fraction() * 100
+    trigger = agent.compact_at()
+    # Progress is shown against the point where reclaiming starts, not the
+    # raw window: with a 1M window a truthful "0% full" would say nothing
+    # about how close the next compaction is.
+    pct = used / max(1, trigger) * 100
     measured = "measured" if agent.last_input_tokens else "estimated"
     bar_width = 24
     filled = min(bar_width, int(bar_width * pct / 100))
     bar = "█" * filled + "·" * (bar_width - filled)
-    color = RED if pct >= 90 else (YELLOW if pct >= cfg.compact_threshold * 100 else GREEN)
+    color = RED if pct >= 90 else (YELLOW if pct >= 70 else GREEN)
     print(f"{BOLD}Context{RESET}")
-    print(f"  {color}{bar}{RESET} {pct:.0f}%  ({used:,} / {limit:,} tokens, {measured})")
+    print(f"  {color}{bar}{RESET} {pct:.0f}% to compaction  "
+          f"({used:,} tokens, {measured})")
+    print(f"  {DIM}window {limit:,} · reclaims at {trigger:,}{RESET}")
     print(f"  messages: {len(agent.messages)}   output so far: {agent.total_output_tokens:,} tokens")
     if agent.total_cache_read_tokens:
         # Worth surfacing: a sudden drop means something upstream of the
@@ -204,9 +210,7 @@ def _print_context(cfg: Config, agent) -> None:
     if len(store):
         print(f"  {DIM}offloaded: {len(store)} result(s), "
               f"{store.total_chars() / 1024:.0f} KB on disk{RESET}")
-    if cfg.auto_compact:
-        print(f"  {DIM}auto-compacts at {cfg.compact_threshold * 100:.0f}%{RESET}")
-    else:
+    if not cfg.auto_compact:
         print(f"  {DIM}auto-compaction off — use /compact{RESET}")
 
 

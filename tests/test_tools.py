@@ -320,6 +320,21 @@ class TestBashStreaming(ToolTestCase):
         self.assertIn("timed out", str(ctx.exception))
         self.assertLess(time.monotonic() - started, 10)
 
+    def test_a_long_log_survives_for_offloading(self):
+        """Cutting at 30k chars threw away most of a build log before the
+        lossless path ever saw it."""
+        out = tool_bash(self.cfg,
+                        "for i in $(seq 1 3000); do echo \"line $i of output\"; done")
+        self.assertIn("line 3000", out)
+        self.assertNotIn("output truncated", out)
+
+    def test_a_pathological_output_is_still_bounded(self):
+        from lindwyrm.tools import MAX_BASH_OUTPUT
+        out = tool_bash(self.cfg,
+                        f"python3 -c \"print('x' * {MAX_BASH_OUTPUT * 2})\"")
+        self.assertLess(len(out), MAX_BASH_OUTPUT + 200)
+        self.assertIn("output truncated", out)
+
     def test_no_output_is_reported_as_such(self):
         self.assertIn("(no output)", tool_bash(self.cfg, "true"))
 

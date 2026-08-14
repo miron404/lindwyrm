@@ -32,6 +32,10 @@ from .sandbox import (
 MAX_READ_BYTES = 256 * 1024  # don't dump huge files into context blindly
 MAX_GREP_BYTES = 8 * 1024 * 1024  # skip files too big to be worth searching
 
+# Ceiling on captured command output. Anything above the offload threshold is
+# moved to disk intact, so this only bounds the truly pathological case.
+MAX_BASH_OUTPUT = 400_000
+
 DIFF_CONTEXT = 3      # unchanged lines shown around each hunk
 MAX_DIFF_LINES = 60   # a full-file rewrite shouldn't bury the prompt
 
@@ -536,8 +540,12 @@ def tool_bash(cfg: Config, command: str, timeout: int = 60,
         raise
 
     out = out.strip() or "(no output)"
-    if len(out) > 30_000:
-        out = out[:30_000] + "\n... (output truncated)"
+    if len(out) > MAX_BASH_OUTPUT:
+        # Truncation here is a last resort and loses data for good. The
+        # earlier limit was low enough that a long build log was cut before
+        # offloading -- which is lossless and would have kept all of it --
+        # ever got a look at it. This is now a sanity bound, not a policy.
+        out = out[:MAX_BASH_OUTPUT] + "\n... (output truncated)"
     return f"exit code: {proc.returncode}\n{out}"
 
 
