@@ -21,7 +21,13 @@ default_preset = "flash"
 # base_url = "https://api.deepseek.com/anthropic"
 # max_tokens = 8192          # ceiling is 384000; thinking tokens count toward this
 # thinking = true
-# thinking_budget = 4096     # reasoning token budget when thinking is on
+# thinking_budget = 4096     # cap on reasoning tokens. Anthropic's own API
+#                            # honors this; DeepSeek accepts it and ignores it
+#                            # (measured: 512 and 30000 give the same amount of
+#                            # thinking), so there max_tokens is the only thing
+#                            # bounding how long the model reasons -- and a hard
+#                            # question can spend the whole allowance thinking
+#                            # before it starts answering.
 # temperature = 0.3          # only applied when thinking = false
 
 # --- Context management ----------------------------------------------------
@@ -36,7 +42,13 @@ default_preset = "flash"
 #                            # whether a test run landed in them. Capped at a
 #                            # quarter of context_limit so a small window still
 #                            # leaves something to compact.
-# context_limit = 128000     # your model's window; also settable per-preset
+# context_limit = 128000     # your model's window; also settable per-preset.
+#                            # The built-in DeepSeek presets set 1000000, the
+#                            # real V4 window. With a window that large the 75%
+#                            # trigger is a very long way off, which is the
+#                            # point -- summarizing is lossy, so not needing it
+#                            # is better than doing it well. Lower the threshold
+#                            # instead if you'd rather cap what each turn sends.
 
 # Before summarizing, bulky tool results are moved to disk and replaced with a
 # short stub the model can expand via read_offloaded. Cheaper than a summary
@@ -129,6 +141,25 @@ thinking_display = "peek"  # how to show reasoning: "peek" | "show" | "hide"
 #   than quietly billing part of the context at zero.
 # proxy = "socks5h://127.0.0.1:1080"      # this provider only; false = go direct
 #                                          # even when a global proxy is set
+#
+# Prices, per MILLION tokens. Nothing ships with prices filled in -- these
+# change, and a stale number is worse than none. DeepSeek's, as published for
+# 2026-08-16, are below; they are the PEAK figures, and off-peak is exactly
+# half, so these overstate rather than surprise you. lindwyrm does not model
+# time-of-day pricing: halve them if you work off-peak.
+#
+#   deepseek-v4-flash   price_cache_read = 0.014
+#                       price_input      = 0.44    (cache miss)
+#                       price_output     = 1.32
+#   deepseek-v4-pro     price_cache_read = 0.044
+#                       price_input      = 1.32
+#                       price_output     = 3.96
+#
+# The gap between a cache hit and a miss is ~30x. That is why the system
+# prompt and tool schemas are kept byte-stable across turns.
+# price_input = 0.44
+# price_cache_read = 0.014
+# price_output = 1.32
 # max_completion_tokens = false           # send "max_completion_tokens" instead
 #                                          # of "max_tokens". Newer OpenAI
 #                                          # reasoning models require it; most

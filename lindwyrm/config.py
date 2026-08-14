@@ -149,6 +149,10 @@ class Preset:
     key_file: str | None = None  # fallback if no env var is set
     thinking: bool = True
     max_tokens: int = 8192
+    # Cap on reasoning tokens. Honored by Anthropic's own API; DeepSeek
+    # accepts the field and ignores it -- measured, with budget_tokens=512
+    # and =30000 producing the same amount of thinking. There, max_tokens is
+    # the only thing that bounds how long the model reasons.
     thinking_budget: int = 4096
     temperature: float | None = None
     # Size of the model's context window, in tokens. Used to decide when the
@@ -170,14 +174,20 @@ class Preset:
     extra_body: dict = field(default_factory=dict)
 
 
+# Both V4 models take a 1M-token context and emit up to 384K. The generic
+# Preset default is far smaller, since it has to suit an unknown provider.
+DEEPSEEK_CONTEXT_LIMIT = 1_000_000
+
 BUILTIN_PRESETS: dict[str, Preset] = {
     "deepseek-flash": Preset(
         name="deepseek-flash", format="anthropic",
         base_url=DEFAULT_BASE_URL, model="deepseek-v4-flash",
+        context_limit=DEEPSEEK_CONTEXT_LIMIT,
     ),
     "deepseek-pro": Preset(
         name="deepseek-pro", format="anthropic",
         base_url=DEFAULT_BASE_URL, model="deepseek-v4-pro",
+        context_limit=DEEPSEEK_CONTEXT_LIMIT,
     ),
 }
 PRESET_ALIASES = {"flash": "deepseek-flash", "pro": "deepseek-pro"}
@@ -418,6 +428,10 @@ class Config:
     format: str = "anthropic"  # "anthropic" | "openai" -- selects the wire client
     max_tokens: int = 8192
     thinking: bool = True
+    # Cap on reasoning tokens. Honored by Anthropic's own API; DeepSeek
+    # accepts the field and ignores it -- measured, with budget_tokens=512
+    # and =30000 producing the same amount of thinking. There, max_tokens is
+    # the only thing that bounds how long the model reasons.
     thinking_budget: int = 4096
     temperature: float | None = None
     max_completion_tokens: bool = False

@@ -128,6 +128,31 @@ class TestInPlaceSwitch(unittest.TestCase):
         self.assertEqual(self.cfg.format, before)
 
 
+class TestBuiltinPresets(unittest.TestCase):
+    def test_deepseek_presets_declare_the_real_context_window(self):
+        """The generic Preset default is 128k, which understated the V4
+        window eightfold and made compaction fire long before it had to."""
+        from lindwyrm.config import BUILTIN_PRESETS
+        for name, preset in BUILTIN_PRESETS.items():
+            with self.subTest(preset=name):
+                self.assertEqual(preset.context_limit, 1_000_000)
+
+    def test_no_prices_are_shipped(self):
+        """They change -- twice during this project's life -- and a stale
+        number is worse than none."""
+        from lindwyrm.config import BUILTIN_PRESETS
+        for name, preset in BUILTIN_PRESETS.items():
+            with self.subTest(preset=name):
+                self.assertIsNone(preset.price_input)
+                self.assertIsNone(preset.price_output)
+
+    def test_max_tokens_stays_within_the_model_ceiling(self):
+        from lindwyrm.config import BUILTIN_PRESETS, MODEL_MAX_TOKENS_CEILING
+        for name, preset in BUILTIN_PRESETS.items():
+            with self.subTest(preset=name):
+                self.assertLessEqual(preset.max_tokens, MODEL_MAX_TOKENS_CEILING)
+
+
 class TestPresetBuilding(unittest.TestCase):
     """_build_presets inherits generically, so a new plain field needs no
     change there either."""

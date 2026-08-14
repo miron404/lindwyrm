@@ -188,20 +188,38 @@ full, reclaims space in two stages:
 from cache; `/compact [instructions]` runs it on demand, optionally told what
 to keep.
 
+The built-in DeepSeek presets declare the real 1M window, so in practice the
+trigger is a long way off and summarizing rarely happens at all — which is
+the point, since it is the lossy stage. A single oversized tool result still
+goes to disk immediately, regardless of how full the window is.
+
+One provider quirk worth knowing: DeepSeek accepts `thinking_budget` and
+ignores it, so on DeepSeek `max_tokens` is the only thing bounding how long
+the model reasons — a hard question can spend the entire allowance thinking
+before it starts to answer. Anthropic's own API honors the budget.
+
 Add prices to a preset and a running total appears after each turn:
 
 ```toml
 [[presets]]
 name = "flash"
-price_input = 0.28        # per million tokens
-price_cache_read = 0.028  # cached input, usually far cheaper
-price_output = 0.42
+price_input = 0.44        # per million tokens, cache miss
+price_cache_read = 0.014  # cache hit — around 30x cheaper
+price_output = 1.32
 ```
 
 Fresh input, cache reads and cache writes are counted separately, because
 they are billed separately — on a typical session most of the input comes
 from cache, and lumping them together overstates the bill several times over.
-No prices ship built in: they change, and a stale number is worse than none.
+No prices ship built in: they change — DeepSeek's moved twice while this was
+being written, and now vary by time of day. `lindwyrm.example.toml` carries
+the current published figures with the date they were taken; they are the
+peak ones, since overstating is the safer error. Time-of-day pricing is not
+modelled, so halve them if you work off-peak.
+
+That ~30x gap between a hit and a miss is why the system prompt and tool
+schemas are kept byte-stable across turns: anything that shifts the start of
+the prompt re-charges the whole conversation at miss rates.
 
 ## Sessions
 
