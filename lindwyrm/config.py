@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass, field, replace
+from dataclasses import MISSING, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Literal
 
@@ -206,6 +206,53 @@ def _resolve_preset_api_key(preset: Preset, global_key_file: str | None,
     )
 
 
+# Preset fields that map onto a Config field of the same name. Derived from
+# the dataclass rather than written out, because three separate hand-kept
+# copies of this list is exactly how `/model` twice ended up silently keeping
+# the previous provider's value for a newly added field.
+#   name        -> Config.preset_name
+#   api_key_env -> used to resolve Config.api_key, not stored
+#   key_file    -> same
+#   proxy       -> resolved against the global setting, not copied verbatim
+_PRESET_ONLY_FIELDS = frozenset({"name", "api_key_env", "key_file", "proxy"})
+
+
+def preset_config_fields() -> tuple[str, ...]:
+    return tuple(f.name for f in fields(Preset) if f.name not in _PRESET_ONLY_FIELDS)
+
+
+def _field_default(field):
+    if field.default is not MISSING:
+        return field.default
+    if field.default_factory is not MISSING:  # type: ignore[misc]
+        return field.default_factory()  # type: ignore[misc]
+    return None
+
+
+def _inherit(entry: dict, base: Preset | None, field):
+    """A preset entry's value for one field: explicit, else inherited, else
+    the dataclass default."""
+    if field.name in entry:
+        return entry[field.name]
+    if base is not None:
+        return getattr(base, field.name)
+    return _field_default(field)
+
+
+def preset_overrides(preset: Preset, cfg: "Config") -> dict:
+    """Every Config field a preset switch changes, as a plain dict.
+
+    The single place that knows this mapping. `/model` applies it in place
+    and with_preset() applies it to a copy, so the two can never drift.
+    """
+    values = {name: getattr(preset, name) for name in preset_config_fields()}
+    values["extra_body"] = dict(preset.extra_body)
+    values["preset_name"] = preset.name
+    values["proxy"] = cfg.resolve_proxy(preset)
+    values["api_key"] = _resolve_preset_api_key(preset, cfg.global_key_file)
+    return values
+
+
 def _build_presets(data: dict) -> dict[str, Preset]:
     """Builtin presets plus any user-defined [[presets]] entries.
 
@@ -219,45 +266,41 @@ def _build_presets(data: dict) -> dict[str, Preset]:
         name = entry["name"]
         base = presets.get(name)
 
-        fmt = entry.get("format", base.format if base else "openai")
-        if fmt not in ("anthropic", "openai"):
-            raise SystemExit(f"presets.{name}.format must be 'anthropic' or 'openai', got {fmt!r}")
+        # Every field is inherited generically, so a new one added to Preset
+        # is picked up here without touching this function. Only the fields
+        # that need validating or coercing are named below.
+        values = {f.name: _inherit(entry, base, f)
+                  for f in fields(Preset) if f.name != "name"}
 
-        api_key_env = entry.get("api_key_env", list(base.api_key_env) if base else [])
+        fmt = values["format"] if base or "format" in entry else "openai"
+        if fmt not in ("anthropic", "openai"):
+            raise SystemExit(
+                f"presets.{name}.format must be 'anthropic' or 'openai', got {fmt!r}")
+        values["format"] = fmt
+
+        api_key_env = values["api_key_env"] or []
         if isinstance(api_key_env, str):
             api_key_env = [api_key_env]
+        values["api_key_env"] = tuple(api_key_env)
 
-        if "base_url" not in entry and base is None:
-            raise SystemExit(f"preset '{name}' needs a base_url")
-        if "model" not in entry and base is None:
-            raise SystemExit(f"preset '{name}' needs a model")
+        if base is None:
+            for required in ("base_url", "model"):
+                if required not in entry:
+                    raise SystemExit(f"preset '{name}' needs a {required}")
+            # Most OpenAI-compatible endpoints don't support DeepSeek-style
+            # thinking, so a brand-new preset starts with it off rather than
+            # inheriting Preset's own default.
+            values["thinking"] = bool(entry.get("thinking", False))
 
-        presets[name] = Preset(
-            name=name,
-            format=fmt,
-            base_url=entry.get("base_url", base.base_url if base else ""),
-            model=entry.get("model", base.model if base else ""),
-            api_key_env=tuple(api_key_env),
-            key_file=entry.get("key_file", base.key_file if base else None),
-            # Default thinking=False for brand-new (non-builtin) presets: most
-            # OpenAI-compatible endpoints don't support DeepSeek-style thinking.
-            thinking=bool(entry.get("thinking", base.thinking if base else False)),
-            max_tokens=int(entry.get("max_tokens", base.max_tokens if base else 8192)),
-            thinking_budget=int(entry.get("thinking_budget", base.thinking_budget if base else 4096)),
-            temperature=entry.get("temperature", base.temperature if base else None),
-            context_limit=int(entry.get("context_limit", base.context_limit if base else 128_000)),
-            max_completion_tokens=bool(entry.get(
-                "max_completion_tokens", base.max_completion_tokens if base else False)),
-            proxy=(parse_proxy(entry["proxy"], f"presets.{name}.proxy")
-                   if "proxy" in entry else (base.proxy if base else None)),
-            price_input=entry.get("price_input", base.price_input if base else None),
-            price_output=entry.get("price_output", base.price_output if base else None),
-            price_cache_read=entry.get("price_cache_read",
-                                       base.price_cache_read if base else None),
-            price_cache_write=entry.get("price_cache_write",
-                                        base.price_cache_write if base else None),
-            extra_body=dict(entry.get("extra_body", base.extra_body if base else {})),
-        )
+        for field_name, cast in (("thinking", bool), ("max_tokens", int),
+                                 ("thinking_budget", int), ("context_limit", int),
+                                 ("max_completion_tokens", bool)):
+            values[field_name] = cast(values[field_name])
+        if "proxy" in entry:
+            values["proxy"] = parse_proxy(entry["proxy"], f"presets.{name}.proxy")
+        values["extra_body"] = dict(values["extra_body"] or {})
+
+        presets[name] = Preset(name=name, **values)
     return presets
 
 
@@ -416,6 +459,9 @@ class Config:
     # Path to the project instructions file. Unset means look for
     # LINDWYRM.md then AGENTS.md in the project root.
     context_file: str | None = None
+    # Where personal (cross-project) instructions live. Only overridden by
+    # tests, which must not pick up the real user's AGENTS.md.
+    user_context_dir: Path | None = None
 
     # Write each turn to ~/.local/share/lindwyrm/sessions so a closed
     # terminal doesn't lose the conversation.
@@ -445,27 +491,7 @@ class Config:
         preset = self.presets.get(key)
         if preset is None:
             return replace(self, model=name)
-        api_key = _resolve_preset_api_key(preset, self.global_key_file)
-        return replace(
-            self,
-            preset_name=preset.name,
-            format=preset.format,
-            base_url=preset.base_url,
-            model=preset.model,
-            api_key=api_key,
-            thinking=preset.thinking,
-            max_tokens=preset.max_tokens,
-            thinking_budget=preset.thinking_budget,
-            temperature=preset.temperature,
-            context_limit=preset.context_limit,
-            max_completion_tokens=preset.max_completion_tokens,
-            proxy=self.resolve_proxy(preset),
-            price_input=preset.price_input,
-            price_output=preset.price_output,
-            price_cache_read=preset.price_cache_read,
-            price_cache_write=preset.price_cache_write,
-            extra_body=dict(preset.extra_body),
-        )
+        return replace(self, **preset_overrides(preset, self))
 
     def resolve_proxy(self, preset: Preset) -> str:
         """Effective proxy for `preset`: --proxy, else the preset's own

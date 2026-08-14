@@ -1,8 +1,9 @@
 """History compaction: cutting in the wrong place is an API 400, so the
 boundary logic is the part worth pinning down."""
 
-import pathlib
 import unittest
+
+from helpers import make_config
 
 from lindwyrm.agent import estimate_tokens, find_cut_index, is_turn_boundary
 
@@ -121,33 +122,13 @@ class TestCompact(unittest.TestCase):
     """compact() with the model call stubbed out -- no network involved."""
 
     def make_agent(self, keep_last=2, fail=False):
-        import dataclasses
-
         from lindwyrm.agent import Agent
 
-        @dataclasses.dataclass
-        class Cfg:
-            compact_keep_last: int
-            context_limit: int = 1000
-            auto_compact: bool = True
-            compact_threshold: float = 0.75
-            # 1 token: the protected zone is then driven purely by
-            # compact_keep_last, which keeps these tests deterministic
-            # regardless of how long the fake messages happen to be.
-            compact_keep_tokens: int = 1
-            offload: bool = False
-            offload_threshold_tokens: int = 1000
-            offload_eager_tokens: int = 8000
-            format: str = "anthropic"
-            thinking: bool = True
-            audit_log: object = None
-            project_root: object = pathlib.Path("/nonexistent-project")
-            # Point the user-level lookup at nothing, so a real
-            # ~/.config/lindwyrm/AGENTS.md on the machine running the tests
-            # can't leak into them.
-            user_context_dir: object = pathlib.Path("/nonexistent-userdir")
-
-        agent = Agent(Cfg(compact_keep_last=keep_last))
+        # compact_keep_tokens=1 leaves the protected zone driven purely by
+        # the message count, which keeps these tests independent of how long
+        # the fake messages happen to be.
+        agent = Agent(make_config(compact_keep_last=keep_last,
+                                  compact_keep_tokens=1, context_limit=1000))
         agent.messages = [
             user_text("a"), assistant_tool_use("t1"), tool_results("t1"),
             assistant_text("did a"),

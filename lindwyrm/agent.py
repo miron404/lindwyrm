@@ -20,7 +20,7 @@ from typing import Callable
 from . import openai_client
 from .client import StreamHandler, stream_message
 from .config import Config
-from .offload import estimate_text_tokens, get_store
+from .offload import CHARS_PER_TOKEN, estimate_text_tokens, get_store
 from .project import load_project_context
 from .tools import TOOL_SCHEMAS, run_tool
 
@@ -56,11 +56,6 @@ SUMMARY_PREFIX = (
     "[Summary of earlier conversation, compacted to save context. Treat this "
     "as established background:]\n\n"
 )
-
-# Rough fallback when a provider reports no usage numbers. English prose and
-# code both land near 4 characters per token; this only needs to be close
-# enough to trigger compaction at a sane time.
-CHARS_PER_TOKEN = 4
 
 # Tools whose output is bulk data worth moving to disk. The others return a
 # line or two ("Wrote 412 chars to ..."), where a stub would cost more than
@@ -148,8 +143,8 @@ class Agent:
         # request, so it must not shift between turns.
         extra, self.context_files = load_project_context(
             cfg.project_root,
-            explicit=getattr(cfg, "context_file", None),
-            user_dir=getattr(cfg, "user_context_dir", None))
+            explicit=cfg.context_file,
+            user_dir=cfg.user_context_dir)
         self.system_prompt = SYSTEM_PROMPT + extra
         # Input tokens the API reported for the most recent request; this is
         # what the next request will cost before anything new is added.
@@ -246,9 +241,9 @@ class Agent:
         get_store().restore(state.get("offloaded") or [])
 
     def has_prices(self) -> bool:
-        return any(getattr(self.cfg, f, None) is not None
-                   for f in ("price_input", "price_output",
-                             "price_cache_read", "price_cache_write"))
+        return any(getattr(self.cfg, name) is not None
+                   for name in ("price_input", "price_output",
+                                "price_cache_read", "price_cache_write"))
 
     def session_cost(self) -> float | None:
         """Spend so far, or None when no prices are configured.
@@ -433,8 +428,8 @@ class Agent:
             if handler.input_tokens:
                 self.last_input_tokens = handler.input_tokens
             self.total_output_tokens += handler.output_tokens
-            cache_read = getattr(handler, "cache_read_tokens", 0)
-            cache_write = getattr(handler, "cache_write_tokens", 0)
+            cache_read = handler.cache_read_tokens
+            cache_write = handler.cache_write_tokens
             self.total_cache_read_tokens += cache_read
             self.total_cache_write_tokens += cache_write
             # input_tokens is the whole context; the cached parts are priced

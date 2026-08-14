@@ -108,9 +108,6 @@ class Renderer:
         seconds = time.monotonic() - self._started
         return f"{seconds:4.0f}s"
 
-    def _status(self, label: str) -> "Text":
-        return Text(f"  {label}… {self._elapsed()}", style="dim")
-
     def _get_spinner(self, label: str):
         """One Spinner for the whole wait.
 

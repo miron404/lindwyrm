@@ -9,32 +9,16 @@ import dataclasses
 import pathlib
 import unittest
 
+from helpers import make_config
+
 from lindwyrm.agent import Agent
 
 
-@dataclasses.dataclass
-class Cfg:
-    price_input: float | None = None
-    price_output: float | None = None
-    price_cache_read: float | None = None
-    price_cache_write: float | None = None
-    context_limit: int = 100_000
-    compact_keep_last: int = 2
-    compact_keep_tokens: int = 1
-    offload: bool = False
-    offload_threshold_tokens: int = 1000
-    offload_eager_tokens: int = 8000
-    auto_compact: bool = True
-    compact_threshold: float = 0.75
-    format: str = "anthropic"
-    thinking: bool = True
-    audit_log: object = None
-    project_root: object = pathlib.Path("/nonexistent-project")
-    user_context_dir: object = pathlib.Path("/nonexistent-userdir")
+
 
 
 def agent_with(**prices):
-    a = Agent(Cfg(**prices))
+    a = Agent(make_config(**prices))
     a.total_fresh_input_tokens = 1_000_000
     a.total_cache_read_tokens = 1_000_000
     a.total_cache_write_tokens = 1_000_000
@@ -57,7 +41,7 @@ class TestNoPrices(unittest.TestCase):
 
 class TestArithmetic(unittest.TestCase):
     def test_prices_are_per_million_tokens(self):
-        a = Agent(Cfg(price_input=3.0))
+        a = Agent(make_config(price_input=3.0))
         a.total_fresh_input_tokens = 1_000_000
         self.assertAlmostEqual(a.session_cost(), 3.0)
 
@@ -68,9 +52,9 @@ class TestArithmetic(unittest.TestCase):
         self.assertAlmostEqual(a.session_cost(), 43.0)
 
     def test_cache_read_is_cheaper_than_fresh_input(self):
-        cached = Agent(Cfg(price_input=10.0, price_cache_read=1.0))
+        cached = Agent(make_config(price_input=10.0, price_cache_read=1.0))
         cached.total_cache_read_tokens = 1_000_000
-        fresh = Agent(Cfg(price_input=10.0, price_cache_read=1.0))
+        fresh = Agent(make_config(price_input=10.0, price_cache_read=1.0))
         fresh.total_fresh_input_tokens = 1_000_000
         self.assertLess(cached.session_cost(), fresh.session_cost())
 
@@ -81,7 +65,7 @@ class TestArithmetic(unittest.TestCase):
         self.assertAlmostEqual(a.session_cost(), 30.0)  # fresh + read + write
 
     def test_zero_usage_costs_nothing(self):
-        self.assertAlmostEqual(Agent(Cfg(price_input=5.0)).session_cost(), 0.0)
+        self.assertAlmostEqual(Agent(make_config(price_input=5.0)).session_cost(), 0.0)
 
 
 class TestTokenSplit(unittest.TestCase):
@@ -96,7 +80,7 @@ class TestTokenSplit(unittest.TestCase):
             self.content = [{"type": "text", "text": "done"}]
 
     def run_once(self, handler):
-        a = Agent(Cfg(price_input=1.0))
+        a = Agent(make_config(price_input=1.0))
         a._call_model = lambda *args, **kw: handler
         a.add_user("hi")
         a.run_turn(on_text=lambda _: None)
@@ -119,7 +103,7 @@ class TestTokenSplit(unittest.TestCase):
         self.assertEqual(a.total_fresh_input_tokens, 0)
 
     def test_totals_accumulate_across_turns(self):
-        a = Agent(Cfg(price_input=1.0))
+        a = Agent(make_config(price_input=1.0))
         a._call_model = lambda *args, **kw: self.Handler(total=100, out=10)
         for _ in range(3):
             a.add_user("hi")

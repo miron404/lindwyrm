@@ -41,12 +41,18 @@ import sys
 from pathlib import Path
 
 from .agent import Agent
-from .config import Config, load_config, mask_proxy, parse_proxy
+from .config import (
+    Config,
+    load_config,
+    mask_proxy,
+    parse_proxy,
+    preset_overrides,
+)
 from .http import APIError, close_client
 from . import offload
 from .offload import get_store
 from .project import CONTEXT_FILENAMES, TEMPLATE, find_context_file
-from .render import Renderer, _HAS_RICH
+from .render import Renderer, _esc, _HAS_RICH
 from .sandbox import UserQuit, reset_session_grants
 from .session import (
     describe_age,
@@ -318,9 +324,6 @@ def make_tool_result_printer(renderer: Renderer):
     return on_tool_result
 
 
-def _esc(s: str) -> str:
-    """Escape rich markup so file contents can't be interpreted as tags."""
-    return s.replace("[", "\\[")
 
 
 def _setup_history() -> None:
@@ -645,23 +648,21 @@ def _perm_command(cfg: Config, args: list[str]) -> None:
     print(f"  rule set (this session): {_rel_display(cfg, target)} -> {summary}")
 
 
-# Every Config field a preset can carry. Kept next to Preset itself in spirit:
-# forgetting one here means /model silently keeps the old provider's value.
-PRESET_FIELDS = (
-    "preset_name", "format", "base_url", "model", "api_key",
-    "thinking", "max_tokens", "thinking_budget", "temperature",
-    "context_limit", "max_completion_tokens", "proxy", "extra_body",
-    "price_input", "price_output", "price_cache_read", "price_cache_write",
-)
-
-
 def _switch_preset(cfg: Config, name: str, agent: Agent | None = None) -> None:
-    """Switch cfg to a different preset IN PLACE (cfg is shared by reference
-    across the REPL, so we copy every field a preset switch can touch rather
-    than replacing the object)."""
+    """Switch cfg to a different preset IN PLACE.
+
+    cfg is shared by reference across the REPL, so the fields are copied onto
+    it rather than the object being replaced. Which fields those are comes
+    from config.preset_overrides -- the same mapping with_preset() uses, so
+    the two cannot disagree about a newly added preset field.
+    """
     new = cfg.with_model(name)  # may raise SystemExit if the key is missing
-    for f in PRESET_FIELDS:
-        setattr(cfg, f, getattr(new, f))
+    if new.preset_name == cfg.preset_name and new.model != cfg.model:
+        # A bare model id rather than a preset name: only the model changes.
+        cfg.model = new.model
+        return
+    for field_name in preset_overrides(cfg.presets[new.preset_name], cfg):
+        setattr(cfg, field_name, getattr(new, field_name))
     if agent is not None:
         # The recorded input size came from the previous provider's tokenizer
         # and was measured against its context window. Keeping it would judge

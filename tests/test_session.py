@@ -6,6 +6,8 @@ import pathlib
 import tempfile
 import time
 import unittest
+
+from helpers import make_config
 from pathlib import Path
 
 from lindwyrm import offload, session
@@ -23,25 +25,7 @@ def assistant_thinking(text="reasoning"):
         {"type": "text", "text": "answer"}]}
 
 
-@dataclasses.dataclass
-class Cfg:
-    context_limit: int = 100_000
-    compact_keep_last: int = 2
-    compact_keep_tokens: int = 1
-    offload: bool = True
-    offload_threshold_tokens: int = 1000
-    offload_eager_tokens: int = 8000
-    auto_compact: bool = True
-    compact_threshold: float = 0.75
-    format: str = "anthropic"
-    thinking: bool = True
-    audit_log: object = None
-    project_root: object = pathlib.Path("/nonexistent-project")
-    user_context_dir: object = pathlib.Path("/nonexistent-userdir")
-    price_input: float | None = None
-    price_output: float | None = None
-    price_cache_read: float | None = None
-    price_cache_write: float | None = None
+
 
 
 class SessionTestCase(unittest.TestCase):
@@ -190,7 +174,7 @@ class TestAgentSnapshot(SessionTestCase):
         super().tearDown()
 
     def test_history_and_counters_round_trip(self):
-        agent = Agent(Cfg())
+        agent = Agent(make_config())
         agent.messages = [user_text("q"), assistant_thinking()]
         agent.last_input_tokens = 1234
         agent.total_output_tokens = 55
@@ -198,7 +182,7 @@ class TestAgentSnapshot(SessionTestCase):
         agent.total_fresh_input_tokens = 300
         agent._tool_labels["t1"] = "read_file a.py"
 
-        restored = Agent(Cfg())
+        restored = Agent(make_config())
         restored.restore(agent.snapshot())
 
         self.assertEqual(restored.messages, agent.messages)
@@ -210,40 +194,40 @@ class TestAgentSnapshot(SessionTestCase):
     def test_offloaded_results_are_still_retrievable(self):
         """Otherwise every [offloaded: ...] stub in a resumed history points
         at a ref that no longer resolves."""
-        agent = Agent(Cfg())
+        agent = Agent(make_config())
         entry = self.store.put("the full content", "read_file big.py")
         state = agent.snapshot()
 
         offload.set_store(OffloadStore(root=self.root / "off"))
-        Agent(Cfg()).restore(state)
+        Agent(make_config()).restore(state)
         self.assertEqual(offload.get_store().get(entry.ref), "the full content")
 
     def test_offloaded_entries_whose_files_vanished_are_dropped(self):
-        agent = Agent(Cfg())
+        agent = Agent(make_config())
         entry = self.store.put("gone soon", "bash ls")
         state = agent.snapshot()
         entry.path.unlink()
 
         fresh = OffloadStore(root=self.root / "off")
         offload.set_store(fresh)
-        Agent(Cfg()).restore(state)
+        Agent(make_config()).restore(state)
         self.assertEqual(len(fresh), 0)
 
     def test_new_refs_do_not_collide_with_restored_ones(self):
-        agent = Agent(Cfg())
+        agent = Agent(make_config())
         self.store.put("one", "a")
         self.store.put("two", "b")
         state = agent.snapshot()
 
         fresh = OffloadStore(root=self.root / "off")
         offload.set_store(fresh)
-        Agent(Cfg()).restore(state)
+        Agent(make_config()).restore(state)
         new_entry = fresh.put("three", "c")
         self.assertEqual(fresh.get(new_entry.ref), "three")
         self.assertEqual(len(fresh), 3)
 
     def test_restoring_an_empty_state_is_safe(self):
-        agent = Agent(Cfg())
+        agent = Agent(make_config())
         agent.restore({})
         self.assertEqual(agent.messages, [])
 

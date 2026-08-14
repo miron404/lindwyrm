@@ -11,6 +11,8 @@ import tempfile
 import time
 import pathlib
 import unittest
+
+from helpers import make_config
 from pathlib import Path
 
 from lindwyrm import offload
@@ -124,26 +126,16 @@ class TestReadOffloadedTool(StoreTestCase):
             self.assertEqual(tool_read_offloaded(None, entry.ref), "ORIGINAL")
 
 
-@dataclasses.dataclass
-class Cfg:
-    context_limit: int = 100_000
-    compact_keep_last: int = 2
-    compact_keep_tokens: int = 1
-    offload: bool = True
-    offload_threshold_tokens: int = 10
-    offload_eager_tokens: int = 100_000
-    auto_compact: bool = True
-    compact_threshold: float = 0.75
-    format: str = "anthropic"
-    thinking: bool = True
-    audit_log: object = None
-    project_root: object = pathlib.Path("/nonexistent-project")
-    user_context_dir: object = pathlib.Path("/nonexistent-userdir")
+
 
 
 class TestMicrocompact(StoreTestCase):
     def make_agent(self, **kw):
-        agent = Agent(Cfg(**kw))
+        # Offloading on, and a low threshold so a fake result counts as bulky.
+        settings = {"offload": True, "offload_threshold_tokens": 10,
+                    "compact_keep_last": 2, "compact_keep_tokens": 1}
+        settings.update(kw)
+        agent = Agent(make_config(**settings))
         big = "x" * 4000
         agent.messages = [
             user_text("do the thing"),
@@ -222,11 +214,11 @@ class TestProtectedZone(unittest.TestCase):
     def test_zone_is_capped_against_a_small_context_window(self):
         """A flat 8k zone would protect everything in an 8k window and
         compaction would never fire at all."""
-        agent = Agent(Cfg(context_limit=4_000, compact_keep_tokens=8_000))
+        agent = Agent(make_config(context_limit=4_000, compact_keep_tokens=8_000))
         self.assertLessEqual(agent.keep_tokens(), 1_000)
 
     def test_configured_zone_is_used_when_it_fits(self):
-        agent = Agent(Cfg(context_limit=200_000, compact_keep_tokens=8_000))
+        agent = Agent(make_config(context_limit=200_000, compact_keep_tokens=8_000))
         self.assertEqual(agent.keep_tokens(), 8_000)
 
 
