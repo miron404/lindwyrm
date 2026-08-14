@@ -174,43 +174,125 @@ shouldn't be able to give orders to an agent that can run commands.
 
 ## Context and cost
 
-Every token of history is re-sent, and re-billed, on every turn. lindwyrm
-tracks the token count the API actually reports and reclaims space at
-whichever comes first: 75% of the window, or 200k tokens.
+A model remembers nothing between requests, so **the whole conversation is
+sent again on every turn** — your questions, its answers, and the full
+contents of every file it has read. The history grows, each request grows
+with it, and that is what costs money and eventually fills the window.
 
-The ceiling matters because a share of the window stops being a sensible rule
-once windows reach a million tokens. 75% of 1M is 750k, where a turn whose
-cache has gone cold costs around 30x a warm one, prefill takes real time, and
-recall degrades. But reclaiming isn't free either — rewriting history
-re-charges everything after the edit at cache-miss rates, which only pays for
-itself after dozens of turns — so the ceiling sits where a cold turn starts
-to hurt rather than as low as possible.
+Three mechanisms manage that. They differ sharply in what they cost and in
+what they destroy, so it is worth knowing which is which.
 
-When the trigger is reached, space is reclaimed in two stages:
+### 1. Offloading on arrival — free, always on
 
-1. **Offloading** moves bulky tool results to disk, leaving a short stub the
-   model can expand with `read_offloaded`. Reversible.
-2. **Summarizing** older history, which is lossy, and only if the first stage
-   wasn't enough.
+The agent reads an 800-line file. Before the next request is even built, the
+result is written to disk and a stub takes its place in the conversation:
 
-Separately, and regardless of how full the window is, a single oversized tool
-result goes to disk the moment it arrives. That case is genuinely free: the
-result is at the very end of the context, so nothing after it needs
-re-caching.
+```
+[offloaded: read_file big.py -- 1200 lines, 42.3 KB, ref off_0001]
+def parse(source):
+    ...
+This is a snapshot from when the tool ran; the file may differ now. Use
+read_offloaded("off_0001") for the full snapshot, or read_file for current
+contents.
+```
 
-`/context` shows how full the window is and how much input is being served
-from cache; `/compact [instructions]` runs it on demand, optionally told what
-to keep.
+Nothing is lost — the full text is on disk and the model can fetch it back.
+And it costs nothing: the result sits at the very end of the context, so
+there is nothing after it that would need re-caching.
 
-The built-in DeepSeek presets declare the real 1M window, so in practice the
-trigger is a long way off and summarizing rarely happens at all — which is
-the point, since it is the lossy stage. A single oversized tool result still
-goes to disk immediately, regardless of how full the window is.
+It applies to the tools that return bulk data — `read_file`, `bash`, `grep`,
+`glob`, `list_dir`. A one-line result like "Wrote 412 chars" is left alone;
+a stub would be longer than the thing it replaced.
+
+### The trigger
+
+Until the conversation crosses a threshold, **nothing else happens at all**.
+The threshold is 75% of the window or 200k tokens, whichever comes first:
+
+| model window | reclaiming starts at |
+|---|---|
+| 16,000 | 12,000 (75%) |
+| 128,000 | 96,000 (75%) |
+| 1,000,000 | 200,000 (the ceiling) |
+
+The ceiling exists because a share of the window stops being a sensible rule
+at a million tokens. 75% of 1M is 750k, where a turn whose cache has gone
+cold costs around 30x a warm one, prefill takes real time, and recall
+degrades. It isn't set lower because reclaiming isn't free either: rewriting
+history re-charges everything after the edit at cache-miss rates, which only
+pays for itself after 50–90 turns. Late, but bounded.
+
+### 2. Offloading retroactively — lossless, but not free
+
+Once over the threshold, older tool results above `offload_threshold_tokens`
+are moved to disk, leaving the same recoverable stub. No information is lost.
+
+This one does cost something: editing the middle of the history invalidates
+the cache from that point on, and the tail is re-charged once at cache-miss
+rates. That is precisely why it waits for pressure instead of running
+continuously.
+
+### 3. Summarizing — lossy, last resort
+
+If space is still short, the model is asked to summarize the older part of
+the conversation, and all of it is replaced by that summary:
+
+```
+[Summary of earlier conversation, compacted to save context. Treat this as
+established background:]
+The user was fixing the parser. src/parser.py and tests/test_a.py were
+edited. pytest was ruled out. Tests pass. The README still needs updating.
+```
+
+Anything not in the summary is **gone for good** — unlike an offloaded
+result, there is nothing to fetch it back from.
+
+### What is never touched
+
+A protected zone of recent conversation, measured in tokens rather than
+messages: four messages might be forty tokens or half the window, depending
+on whether a test run landed in them.
+
+History is also only ever cut at the boundary of one of your turns. A tool
+call and its result cannot be separated — the APIs reject a history where
+they are.
+
+### Settings
+
+| setting | default | what it does |
+|---|---|---|
+| `offload` | `true` | master switch for moving results to disk |
+| `offload_eager_tokens` | `8000` | a single result this big goes to disk on arrival |
+| `offload_threshold_tokens` | `1000` | old results this big are moved once over the threshold |
+| `auto_compact` | `true` | master switch for automatic reclaiming |
+| `compact_threshold` | `0.75` | share of the window that triggers it |
+| `compact_max_tokens` | `200000` | absolute ceiling; `0` disables, leaving only the share |
+| `compact_keep_tokens` | `8000` | size of the protected zone, capped at a quarter of the window |
+| `compact_keep_last` | `4` | messages always kept, however large they are |
+
+Lowering `offload_eager_tokens` much is a false economy: hand the model a
+stub for the file it just asked to read and it will simply read it again.
+
+### Watching it
+
+```
+/context
+  ████····················  8% to compaction  (16,240 tokens, measured)
+  window 1,000,000 · reclaims at 200,000
+  messages: 24   output so far: 3,120 tokens
+  served from cache: 142,880 input tokens (94% of input)
+  offloaded: 3 result(s), 128 KB on disk
+```
+
+`/compact` runs it on demand, and `/compact keep the API decisions, drop the
+debugging` tells the summarizer what matters.
 
 One provider quirk worth knowing: DeepSeek accepts `thinking_budget` and
-ignores it, so on DeepSeek `max_tokens` is the only thing bounding how long
-the model reasons — a hard question can spend the entire allowance thinking
+ignores it, so there `max_tokens` is the only thing bounding how long the
+model reasons — a hard question can spend the entire allowance thinking
 before it starts to answer. Anthropic's own API honors the budget.
+
+### Prices
 
 Add prices to a preset and a running total appears after each turn:
 
