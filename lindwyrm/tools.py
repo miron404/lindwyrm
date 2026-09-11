@@ -10,6 +10,7 @@ no matter how the model phrases its request.
 
 from __future__ import annotations
 
+import base64
 import difflib
 import fnmatch
 import os
@@ -17,6 +18,7 @@ import select
 import signal
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Config
@@ -30,6 +32,23 @@ from .sandbox import (
 )
 
 MAX_READ_BYTES = 256 * 1024  # don't dump huge files into context blindly
+
+# Image formats the provider accepts, keyed by the bytes files actually start
+# with. The format is detected from content rather than the extension because
+# that is what the API does, and a .png that is really a JPEG would otherwise
+# be declared wrongly.
+IMAGE_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+)
+
+# An image costs at most ~1024 tokens however large it is -- the provider
+# resizes before inference. But the base64 travels in every later request, so
+# the ceiling here is about request size and latency, not about billing.
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+IMAGE_TOKENS = 1024
 MAX_GREP_BYTES = 8 * 1024 * 1024  # skip files too big to be worth searching
 
 # Ceiling on captured command output. Anything above the offload threshold is
@@ -38,6 +57,31 @@ MAX_BASH_OUTPUT = 400_000
 
 DIFF_CONTEXT = 3      # unchanged lines shown around each hunk
 MAX_DIFF_LINES = 60   # a full-file rewrite shouldn't bury the prompt
+
+
+@dataclass
+class ImageResult:
+    """A tool result that is a picture rather than text.
+
+    Kept as its own type so the agent can build the right content blocks for
+    whichever wire format is active, instead of every layer having to guess
+    from the shape of a string.
+    """
+
+    media_type: str
+    data: str          # base64, no data: prefix
+    note: str          # what the model sees alongside it
+
+
+def image_media_type(data: bytes) -> str | None:
+    """Media type from the file's leading bytes, or None if not an image."""
+    for magic, media in IMAGE_MAGIC:
+        if data.startswith(magic):
+            return media
+    # WebP is RIFF....WEBP -- the marker sits after a 4-byte length.
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
 
 
 def _looks_binary(path: Path) -> bool:
@@ -188,6 +232,20 @@ TOOL_SCHEMAS = [
                 "end_line": {"type": "integer", "description": "Optional 1-based end line (inclusive)."},
             },
             "required": ["ref"],
+        },
+    },
+    {
+        "name": "view_image",
+        "description": (
+            "Look at an image file -- a screenshot, a diagram, a chart, a "
+            "photo of a whiteboard. Use this instead of read_file for "
+            "pictures: read_file refuses them, since decoding one as text "
+            "produces nothing useful. Only on providers with vision."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "Path to a PNG, JPEG, GIF or WebP file."}},
+            "required": ["path"],
         },
     },
     {
@@ -481,6 +539,38 @@ def tool_read_offloaded(cfg: Config, ref: str, start_line: int | None = None,
         raise SandboxError(f"Could not read offloaded content: {e}") from None
 
 
+def tool_view_image(cfg: Config, path: str) -> ImageResult:
+    """Hand an image file to the model to look at."""
+    target = authorize(cfg, "read", path, f"view image {_reld(cfg, path)}")
+    if not target.is_file():
+        raise SandboxError(f"Not a file: {target}")
+    size = target.stat().st_size
+    if size > MAX_IMAGE_BYTES:
+        raise SandboxError(
+            f"{_rel(cfg, target)} is {size / 1024 / 1024:.1f} MB, over the "
+            f"{MAX_IMAGE_BYTES // 1024 // 1024} MB limit. The image travels "
+            f"with every later request in this conversation, so shrink it "
+            f"first."
+        )
+    try:
+        raw = target.read_bytes()
+    except OSError as e:
+        raise SandboxError(f"Could not read {_rel(cfg, target)}: {e}") from None
+
+    media = image_media_type(raw)
+    if media is None:
+        raise SandboxError(
+            f"{_rel(cfg, target)} is not an image this provider accepts "
+            f"(PNG, JPEG, GIF or WebP). The format is read from the file's "
+            f"contents, not its name."
+        )
+    return ImageResult(
+        media_type=media,
+        data=base64.b64encode(raw).decode("ascii"),
+        note=f"[image: {_rel(cfg, target)}, {media}, {size / 1024:.0f} KB]",
+    )
+
+
 def _kill_process_tree(proc: subprocess.Popen) -> None:
     """SIGTERM the command's whole process group, SIGKILL what survives."""
     try:
@@ -606,6 +696,7 @@ TOOL_FUNCS = {
     "grep": tool_grep,
     "delete_file": tool_delete_file,
     "read_offloaded": tool_read_offloaded,
+    "view_image": tool_view_image,
     "bash": tool_bash,
 }
 

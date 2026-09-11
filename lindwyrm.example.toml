@@ -13,6 +13,11 @@
 # Which preset to start on. Built in: "flash" / "pro" (both DeepSeek, via
 # DeepSeek's Anthropic-compatible endpoint). Set this to a name from
 # [[presets]] below to default to a custom provider instead.
+#
+# "flash" is V4.1 Flash (model name deepseek-flash) and it can see images.
+# "pro" points at deepseek-v4-pro, which cannot -- and which DeepSeek is
+# retiring: since 2026-09-14 those requests are served by V4.1 Flash and
+# billed at the Flash price until a V4.1 Pro exists.
 default_preset = "flash"
 
 # These top-level fields, if set, override the selected preset's own values
@@ -21,13 +26,18 @@ default_preset = "flash"
 # base_url = "https://api.deepseek.com/anthropic"
 # max_tokens = 8192          # ceiling is 384000; thinking tokens count toward this
 # thinking = true
-# thinking_budget = 4096     # cap on reasoning tokens. Anthropic's own API
+# thinking_budget = 4096     # cap on reasoning TOKENS. Anthropic's own API
 #                            # honors this; DeepSeek accepts it and ignores it
 #                            # (measured: 512 and 30000 give the same amount of
-#                            # thinking), so there max_tokens is the only thing
-#                            # bounding how long the model reasons -- and a hard
-#                            # question can spend the whole allowance thinking
-#                            # before it starts answering.
+#                            # thinking).
+# thinking_effort = "high"   # how hard to think, for providers that pick
+#                            # reasoning length by effort instead of a budget.
+#                            # DeepSeek does: minimal | low | medium | high |
+#                            # xhigh | max. Measured on one question, minimal
+#                            # gave 13k characters of reasoning and max 26k.
+#                            # Worth turning down for routine work: reasoning is
+#                            # billed as output and comes out of the same
+#                            # max_tokens allowance as the answer.
 # temperature = 0.3          # only applied when thinking = false
 
 # --- Context management ----------------------------------------------------
@@ -145,6 +155,9 @@ thinking_display = "peek"  # how to show reasoning: "peek" | "show" | "hide"
 #                                          # support DeepSeek-style thinking
 # max_tokens = 8192
 # context_limit = 128000                  # this model's window, for compaction
+# vision = true                           # model can look at images; enables
+#                                          # the view_image tool for this preset
+# thinking_effort = "low"                 # per-provider override
 #
 # Prices, per MILLION tokens, in whatever currency your provider bills you.
 # Nothing ships with prices filled in: they change, and a stale number is
@@ -160,23 +173,23 @@ thinking_display = "peek"  # how to show reasoning: "peek" | "show" | "hide"
 #                                          # even when a global proxy is set
 #
 # Prices, per MILLION tokens. Nothing ships with prices filled in -- these
-# change, and a stale number is worse than none. DeepSeek's, as published for
-# 2026-08-16, are below; they are the PEAK figures, and off-peak is exactly
-# half, so these overstate rather than surprise you. lindwyrm does not model
-# time-of-day pricing: halve them if you work off-peak.
+# change, and a stale number is worse than none. DeepSeek's, as published on
+# 2026-09-11, are below. They are the PEAK figures; off-peak is exactly half,
+# and lindwyrm does not model time-of-day pricing, so halve them if you work
+# off-peak. Peak is 01:00-04:00 and 06:00-10:00 UTC on weekdays.
 #
-#   deepseek-v4-flash   price_cache_read = 0.014
-#                       price_input      = 0.44    (cache miss)
-#                       price_output     = 1.32
+#   deepseek-flash      price_cache_read = 0.006
+#                       price_input      = 0.3     (cache miss)
+#                       price_output     = 1.2
 #   deepseek-v4-pro     price_cache_read = 0.044
 #                       price_input      = 1.32
 #                       price_output     = 3.96
 #
-# The gap between a cache hit and a miss is ~30x. That is why the system
-# prompt and tool schemas are kept byte-stable across turns.
-# price_input = 0.44
-# price_cache_read = 0.014
-# price_output = 1.32
+# The gap between a cache hit and a miss is about 50x on Flash. That is why
+# the system prompt and tool schemas are kept byte-stable across turns.
+# price_input = 0.3
+# price_cache_read = 0.006
+# price_output = 1.2
 # max_completion_tokens = false           # send "max_completion_tokens" instead
 #                                          # of "max_tokens". Newer OpenAI
 #                                          # reasoning models require it; most

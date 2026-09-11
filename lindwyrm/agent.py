@@ -22,7 +22,7 @@ from .client import StreamHandler, stream_message
 from .config import Config
 from .offload import CHARS_PER_TOKEN, estimate_text_tokens, get_store
 from .project import load_project_context
-from .tools import TOOL_SCHEMAS, run_tool
+from .tools import IMAGE_TOKENS, TOOL_SCHEMAS, ImageResult, run_tool
 
 SYSTEM_PROMPT = """You are lindwyrm, a command-line coding assistant. You help \
 the user work in a software project on their machine.
@@ -75,6 +75,16 @@ SUMMARY_PREFIX = (
 # the result itself.
 OFFLOADABLE_TOOLS = frozenset({"read_file", "bash", "grep", "glob", "list_dir"})
 
+# Tools that only make sense on a model that can see. Offering view_image to
+# one that can't just buys a wasted turn and a confused apology.
+VISION_TOOLS = frozenset({"view_image"})
+
+
+def tools_for(cfg: Config) -> list[dict]:
+    if cfg.vision:
+        return TOOL_SCHEMAS
+    return [t for t in TOOL_SCHEMAS if t["name"] not in VISION_TOOLS]
+
 
 def commit_trailer_prompt(cfg: Config) -> str:
     """The configured commit trailer, as an instruction, or nothing.
@@ -101,11 +111,35 @@ def _audit(cfg: Config, record: dict) -> None:
         pass
 
 
+def _measurable(message: dict) -> dict:
+    """A copy with image payloads swapped for a marker.
+
+    Base64 of a 2 MB screenshot is millions of characters but costs about
+    IMAGE_TOKENS to the model. Measuring it literally would report a context
+    ten times its real size and trigger compaction that saves nothing.
+    """
+    if not isinstance(message.get("content"), list):
+        return message
+    out = {**message, "content": []}
+    for block in message["content"]:
+        blocks = block.get("content") if block.get("type") == "tool_result" else None
+        if isinstance(blocks, list):
+            block = {**block, "content": [_strip_image(b) for b in blocks]}
+        out["content"].append(_strip_image(block))
+    return out
+
+
+def _strip_image(block: dict) -> dict:
+    if isinstance(block, dict) and block.get("type") == "image":
+        return {"type": "image", "source": {"_": "x" * (IMAGE_TOKENS * CHARS_PER_TOKEN)}}
+    return block
+
+
 def estimate_tokens(messages: list[dict], system: str = "") -> int:
     """Character-based token estimate, used only when the API reports nothing."""
     chars = len(system)
     for m in messages:
-        chars += len(json.dumps(m, ensure_ascii=False))
+        chars += len(json.dumps(_measurable(m), ensure_ascii=False))
     return chars // CHARS_PER_TOKEN
 
 
@@ -120,7 +154,8 @@ def protected_index(messages: list[dict], keep_tokens: int, keep_last: int) -> i
     total = 0
     index = len(messages)
     for i in range(len(messages) - 1, -1, -1):
-        total += estimate_text_tokens(json.dumps(messages[i], ensure_ascii=False))
+        total += estimate_text_tokens(
+            json.dumps(_measurable(messages[i]), ensure_ascii=False))
         index = i
         if total >= keep_tokens and (len(messages) - i) >= keep_last:
             break
@@ -456,7 +491,7 @@ class Agent:
                         on_notice(note)
 
             handler: StreamHandler = self._call_model(
-                self.messages, self.system_prompt, TOOL_SCHEMAS,
+                self.messages, self.system_prompt, tools_for(self.cfg),
                 on_text=on_text, on_thinking=on_thinking, on_retry=on_retry,
             )
             if handler.input_tokens:
@@ -490,23 +525,38 @@ class Agent:
                 # A single monstrous result (a 200 KB file, a full test log)
                 # can fill the window on its own, so it goes to disk at once
                 # rather than waiting for the pressure trigger.
-                if (self.cfg.offload and not is_error
-                        and name in OFFLOADABLE_TOOLS
-                        and estimate_text_tokens(result) >= self.cfg.offload_eager_tokens):
-                    result = self._offload_result_labelled(
-                        self._tool_labels[tu["id"]], result)
+                if isinstance(result, ImageResult):
+                    # A picture can't be summarized into the transcript, so it
+                    # travels as its own content block. Never offloaded: the
+                    # provider caps it near IMAGE_TOKENS however large the file.
+                    content = [
+                        {"type": "image", "source": {
+                            "type": "base64",
+                            "media_type": result.media_type,
+                            "data": result.data}},
+                        {"type": "text", "text": result.note},
+                    ]
+                    shown = result.note
+                else:
+                    if (self.cfg.offload and not is_error
+                            and name in OFFLOADABLE_TOOLS
+                            and estimate_text_tokens(result) >= self.cfg.offload_eager_tokens):
+                        result = self._offload_result_labelled(
+                            self._tool_labels[tu["id"]], result)
+                    content = result
+                    shown = result
                 _audit(self.cfg, {
                     "tool": name,
                     "input": tool_input,
                     "error": is_error,
-                    "result_preview": result[:200],
+                    "result_preview": shown[:200],
                 })
                 if on_tool_result:
-                    on_tool_result(name, result, is_error)
+                    on_tool_result(name, shown, is_error)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tu["id"],
-                    "content": result,
+                    "content": content,
                     "is_error": is_error,
                 })
             self.messages.append({"role": "user", "content": tool_results})

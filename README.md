@@ -18,7 +18,7 @@ is one package with two runtime dependencies — `httpx` for the wire and
 ```
 $ lwyrm
 lindwyrm - coding agent
-  preset:   deepseek-flash (anthropic, deepseek-v4-flash)
+  preset:   deepseek-flash (anthropic, deepseek-flash)
   thinking: on
   root:     ~/work/shop
   perms:    read=allow write=confirm delete=confirm bash=confirm
@@ -98,8 +98,8 @@ way a shell does. Press it twice, or use **Ctrl+D** or `/exit`, to leave.
 ## Tools
 
 `read_file`, `write_file`, `edit_file`, `list_dir`, `glob`, `grep`,
-`delete_file`, `bash`, `read_offloaded` — identical no matter which
-provider is active.
+`delete_file`, `bash`, `read_offloaded`, `view_image` — identical no matter
+which provider is active.
 
 - `bash` streams output line by line as the command runs, with stdout and
   stderr interleaved in the order they actually happened, and kills the whole
@@ -110,6 +110,11 @@ provider is active.
 - `grep` reads files line by line and skips binaries and vendored
   directories. `list_dir` shows dotfiles and marks symlinks with their target.
 - Every write and every overwrite is previewed as a real unified diff.
+- `view_image` shows the model a screenshot, diagram or chart. It is only
+  offered to models that can see, so the rest don't waste a turn calling it;
+  set `vision = true` on a preset whose model supports images. PNG, JPEG, GIF
+  and WebP, detected from the file's contents rather than its name, because
+  that is how the provider decides too.
 
 Reasoning is streamed where the provider supports it. DeepSeek's Anthropic
 endpoint returns 400 unless thinking blocks are echoed back in history, so
@@ -217,7 +222,8 @@ The threshold is 75% of the window or 200k tokens, whichever comes first:
 
 The ceiling exists because a share of the window stops being a sensible rule
 at a million tokens. 75% of 1M is 750k, where a turn whose cache has gone
-cold costs around 30x a warm one, prefill takes real time, and recall
+cold costs tens of times more than a warm one, prefill takes real time, and
+recall
 degrades. It isn't set lower because reclaiming isn't free either: rewriting
 history re-charges everything after the edit at cache-miss rates, which only
 pays for itself after 50–90 turns. Late, but bounded.
@@ -287,10 +293,22 @@ stub for the file it just asked to read and it will simply read it again.
 `/compact` runs it on demand, and `/compact keep the API decisions, drop the
 debugging` tells the summarizer what matters.
 
-One provider quirk worth knowing: DeepSeek accepts `thinking_budget` and
-ignores it, so there `max_tokens` is the only thing bounding how long the
-model reasons — a hard question can spend the entire allowance thinking
-before it starts to answer. Anthropic's own API honors the budget.
+### How hard the model thinks
+
+Providers disagree on how to control reasoning length. Anthropic's own API
+takes a token budget; DeepSeek accepts `thinking_budget` and ignores it,
+choosing instead between effort levels. `thinking_effort` covers the second
+kind:
+
+```toml
+thinking_effort = "low"    # minimal | low | medium | high | xhigh | max
+```
+
+Measured on one question, `minimal` produced 13k characters of reasoning and
+`max` produced 26k. It is worth turning down for routine work: reasoning is
+billed as output, and on DeepSeek it comes out of the same `max_tokens`
+allowance as the answer — a hard question at a high effort can spend the
+whole budget thinking before it starts to reply.
 
 ### Prices
 
@@ -299,9 +317,9 @@ Add prices to a preset and a running total appears after each turn:
 ```toml
 [[presets]]
 name = "flash"
-price_input = 0.44        # per million tokens, cache miss
-price_cache_read = 0.014  # cache hit — around 30x cheaper
-price_output = 1.32
+price_input = 0.3         # per million tokens, cache miss
+price_cache_read = 0.006  # cache hit — around 50x cheaper
+price_output = 1.2
 ```
 
 Fresh input, cache reads and cache writes are counted separately, because
@@ -313,9 +331,10 @@ the current published figures with the date they were taken; they are the
 peak ones, since overstating is the safer error. Time-of-day pricing is not
 modelled, so halve them if you work off-peak.
 
-That ~30x gap between a hit and a miss is why the system prompt and tool
-schemas are kept byte-stable across turns: anything that shifts the start of
-the prompt re-charges the whole conversation at miss rates.
+That gap between a hit and a miss — about 50x on Flash — is why the system
+prompt and tool schemas are kept byte-stable across turns: anything that
+shifts the start of the prompt re-charges the whole conversation at miss
+rates.
 
 ## Commits
 

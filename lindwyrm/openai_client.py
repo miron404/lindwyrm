@@ -63,7 +63,7 @@ def to_openai_messages(system: str, messages: list[dict]) -> list[dict]:
                     out.append({
                         "role": "tool",
                         "tool_call_id": tr.get("tool_use_id", ""),
-                        "content": tr.get("content", ""),
+                        "content": _tool_content(tr.get("content", "")),
                     })
                 continue
             text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
@@ -87,6 +87,27 @@ def to_openai_messages(system: str, messages: list[dict]) -> list[dict]:
                 ]
             out.append(msg)
     return out
+
+
+def _tool_content(content):
+    """Tool result content in OpenAI shape.
+
+    Text stays a plain string. A result carrying an image becomes the block
+    list the Chat Completions format uses, with the picture as a data: URL --
+    the same content the Anthropic format expresses as an image block.
+    """
+    if isinstance(content, str):
+        return content
+    blocks = []
+    for block in content:
+        if block.get("type") == "image":
+            source = block.get("source", {})
+            blocks.append({"type": "image_url", "image_url": {
+                "url": f"data:{source.get('media_type', 'image/png')};"
+                       f"base64,{source.get('data', '')}"}})
+        elif block.get("type") == "text":
+            blocks.append({"type": "text", "text": block.get("text", "")})
+    return blocks or ""
 
 
 def to_openai_tools(tools: list[dict]) -> list[dict]:
@@ -119,6 +140,13 @@ def _build_body(cfg: Config, messages: list[dict], tools: list[dict]) -> dict:
         # send is a per-provider fact, so it's a preset option.
         field = "max_completion_tokens" if cfg.max_completion_tokens else "max_tokens"
         body[field] = cfg.max_tokens
+    if cfg.thinking_effort:
+        # The real lever on DeepSeek: reasoning length is chosen by effort
+        # level, not by a token budget. Measured -- minimal vs max moved the
+        # reasoning from 19k to 26k characters on the same question.
+        body["reasoning_effort"] = cfg.thinking_effort
+    if not cfg.thinking:
+        body["thinking"] = {"type": "disabled"}
     if cfg.temperature is not None:
         body["temperature"] = cfg.temperature
     if cfg.extra_body:

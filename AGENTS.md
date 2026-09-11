@@ -61,6 +61,18 @@ Each of these has already cost someone an afternoon:
 - **DeepSeek's Anthropic endpoint returns 400 unless thinking blocks are
   echoed back** in message history. This is why assistant content is stored
   and replayed verbatim.
+- **`thinking_budget` does nothing on DeepSeek.** Measured: 512 and 30000
+  produce the same reasoning. `thinking_effort` is the real lever there
+  (minimal→max moved it from 8k to 20k characters through our own client).
+  The budget is kept because Anthropic's own API honors it.
+- **Model names are `deepseek-flash` and `deepseek-v4-pro`.** The older
+  `deepseek-v4-flash` still answers but is retired and served by V4.1 Flash.
+  Since 2026-09-14 `deepseek-v4-pro` is routed to V4.1 Flash too.
+- **Only Flash has vision.** `view_image` is withheld from presets without
+  `vision = true`, so a blind model doesn't waste a turn calling it.
+- **Image payloads must not be measured literally.** Base64 of a screenshot
+  is millions of characters but costs the model about 1024 tokens;
+  `_measurable()` swaps them for a marker before estimating context.
 - **History may only be cut at a user-turn boundary.** Cutting elsewhere
   orphans a `tool_result` from its `tool_use` and both APIs reject it. See
   `is_turn_boundary`.

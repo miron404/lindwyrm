@@ -111,6 +111,21 @@ def parse_proxy(raw, where: str) -> str:
     return value
 
 
+# What the provider accepts. "minimal" and "low" both map to low reasoning,
+# "max" to the longest; the rest sit in between.
+THINKING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def parse_effort(value, where: str = "thinking_effort") -> str | None:
+    if value is None or value == "":
+        return None
+    effort = str(value).strip().lower()
+    if effort not in THINKING_EFFORTS:
+        raise SystemExit(
+            f"{where} must be one of {', '.join(THINKING_EFFORTS)}, got {value!r}")
+    return effort
+
+
 def mask_proxy(proxy: str) -> str:
     """Proxy string safe to print: any password is replaced with ***.
 
@@ -143,7 +158,7 @@ class Preset:
     name: str
     format: str = "anthropic"  # "anthropic" | "openai"
     base_url: str = DEFAULT_BASE_URL
-    model: str = "deepseek-v4-flash"
+    model: str = "deepseek-flash"
     # Env var names to try, in order, for the API key.
     api_key_env: tuple[str, ...] = ("DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY")
     key_file: str | None = None  # fallback if no env var is set
@@ -151,9 +166,16 @@ class Preset:
     max_tokens: int = 8192
     # Cap on reasoning tokens. Honored by Anthropic's own API; DeepSeek
     # accepts the field and ignores it -- measured, with budget_tokens=512
-    # and =30000 producing the same amount of thinking. There, max_tokens is
-    # the only thing that bounds how long the model reasons.
+    # and =30000 producing the same amount of thinking.
     thinking_budget: int = 4096
+    # How hard to think, for providers that choose reasoning length by effort
+    # rather than by a token budget. DeepSeek does: measured, minimal vs max
+    # moved the reasoning from 13k to 26k characters on the same question.
+    # One of minimal/low/medium/high/xhigh/max; unset leaves the default.
+    thinking_effort: str | None = None
+    # Whether the model can look at images. view_image is only offered to
+    # models that can, so the others don't waste a turn calling it.
+    vision: bool = False
     temperature: float | None = None
     # Size of the model's context window, in tokens. Used to decide when the
     # conversation should be compacted -- it is not sent to the API.
@@ -179,11 +201,16 @@ class Preset:
 DEEPSEEK_CONTEXT_LIMIT = 1_000_000
 
 BUILTIN_PRESETS: dict[str, Preset] = {
+    # V4.1 Flash. The old name deepseek-v4-flash still answers, but that model
+    # is retired and its requests are served by this one anyway.
     "deepseek-flash": Preset(
         name="deepseek-flash", format="anthropic",
-        base_url=DEFAULT_BASE_URL, model="deepseek-v4-flash",
-        context_limit=DEEPSEEK_CONTEXT_LIMIT,
+        base_url=DEFAULT_BASE_URL, model="deepseek-flash",
+        context_limit=DEEPSEEK_CONTEXT_LIMIT, vision=True,
     ),
+    # Kept because the name still resolves, but DeepSeek is retiring V4 Pro:
+    # from 2026-09-14 these requests are routed to V4.1 Flash and billed at
+    # the Flash price until a V4.1 Pro exists. It has no vision.
     "deepseek-pro": Preset(
         name="deepseek-pro", format="anthropic",
         base_url=DEFAULT_BASE_URL, model="deepseek-v4-pro",
@@ -304,7 +331,7 @@ def _build_presets(data: dict) -> dict[str, Preset]:
 
         for field_name, cast in (("thinking", bool), ("max_tokens", int),
                                  ("thinking_budget", int), ("context_limit", int),
-                                 ("max_completion_tokens", bool)):
+                                 ("max_completion_tokens", bool), ("vision", bool)):
             values[field_name] = cast(values[field_name])
         if "proxy" in entry:
             values["proxy"] = parse_proxy(entry["proxy"], f"presets.{name}.proxy")
@@ -430,11 +457,20 @@ class Config:
     thinking: bool = True
     # Cap on reasoning tokens. Honored by Anthropic's own API; DeepSeek
     # accepts the field and ignores it -- measured, with budget_tokens=512
-    # and =30000 producing the same amount of thinking. There, max_tokens is
-    # the only thing that bounds how long the model reasons.
+    # and =30000 producing the same amount of thinking.
     thinking_budget: int = 4096
+    # How hard to think, for providers that choose reasoning length by effort
+    # rather than by a token budget. DeepSeek does: measured, minimal vs max
+    # moved the reasoning from 13k to 26k characters on the same question.
+    # One of minimal/low/medium/high/xhigh/max; unset leaves the default.
+    thinking_effort: str | None = None
+    # Whether the model can look at images. view_image is only offered to
+    # models that can, so the others don't waste a turn calling it.
+    vision: bool = False
     temperature: float | None = None
     max_completion_tokens: bool = False
+    thinking_effort: str | None = None
+    vision: bool = False
     # Resolved proxy: "" = direct, "system" = use env vars, else a proxy URL.
     proxy: str = PROXY_DIRECT
     # Per-million-token prices for the active preset; None = don't show cost.
@@ -631,6 +667,9 @@ def load_config(
         temperature=data.get("temperature", preset.temperature),
         max_completion_tokens=bool(data.get(
             "max_completion_tokens", preset.max_completion_tokens)),
+        thinking_effort=parse_effort(
+            data.get("thinking_effort", preset.thinking_effort)),
+        vision=bool(data.get("vision", preset.vision)),
         proxy=preset.proxy if preset.proxy is not None else global_proxy,
         global_proxy=global_proxy,
         price_input=preset.price_input,

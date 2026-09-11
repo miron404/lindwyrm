@@ -43,9 +43,13 @@ def _build_body(cfg: Config, messages: list[dict], system: str, tools: list[dict
         "tools": tools,
     }
     if cfg.thinking:
-        # budget must be < max_tokens; clamp defensively.
+        # budget must be < max_tokens; clamp defensively. Note that DeepSeek
+        # accepts budget_tokens and ignores it -- there, thinking_effort is
+        # what actually shortens or lengthens the reasoning.
         budget = min(cfg.thinking_budget, max(1024, cfg.max_tokens - 1024))
         body["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        if cfg.thinking_effort:
+            body["reasoning_effort"] = cfg.thinking_effort
     else:
         body["thinking"] = {"type": "disabled"}
         # temperature is only meaningful with thinking disabled.
