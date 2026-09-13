@@ -70,6 +70,12 @@ Each of these has already cost someone an afternoon:
   Since 2026-09-14 `deepseek-v4-pro` is routed to V4.1 Flash too.
 - **Only Flash has vision.** `view_image` is withheld from presets without
   `vision = true`, so a blind model doesn't waste a turn calling it.
+- **The eager offload threshold is derived, not fixed.** `offload_eager_tokens
+  = 0` means a 1/32 share of the context window (floor 1,000), because 8,000
+  tokens are half a 16K window and noise in a 1M one. `eager_offload_tokens()`
+  in `config.py`. Lowering it by hand usually costs more than it saves: the
+  model gets an eight-line stub for content it asked for, and caching had made
+  those tokens cheap anyway.
 - **Image payloads must not be measured literally.** Base64 of a screenshot
   is millions of characters but costs the model about 1024 tokens;
   `_measurable()` swaps them for a marker before estimating context.

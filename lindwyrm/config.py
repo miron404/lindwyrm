@@ -516,7 +516,11 @@ class Config:
     # runs first when context gets tight.
     offload: bool = True
     offload_threshold_tokens: int = 1_000   # worth moving once out of the zone
-    offload_eager_tokens: int = 8_000       # so big it goes the moment it appears
+    # A single result this big goes to disk the moment it arrives. 0 means
+    # auto: no one number is right for every model, since the same 8,000
+    # tokens are half a 16K window and noise in a 1M one. See
+    # eager_offload_tokens().
+    offload_eager_tokens: int = 0
 
     # Path to the project instructions file. Unset means look for
     # LINDWYRM.md then AGENTS.md in the project root.
@@ -623,6 +627,32 @@ def _build_policy(data: dict, project_root: Path) -> Policy:
     return p
 
 
+# One result in 32 windows-worth. Offloading on arrival is free -- the stub is
+# appended fresh, so no cached prefix is invalidated -- but it is not without
+# cost: the model asked for this content and gets eight lines of it, so
+# anything it really needs costs a read_offloaded round trip. That trade only
+# pays for a result big enough to matter against the window it sits in, which
+# is why the default is a share of the window rather than a number:
+#
+#   16K window  ->  1,000 (the floor)      128K ->  4,000
+#   200K        ->  6,250                    1M -> 31,250
+#
+# Measured on a real 1M-window session: 111 tool results, 29K tokens all told
+# against a 166K context, and 99.5% of input served from cache. Offloading the
+# two largest would have reclaimed 6% of the context -- the cheapest 6% in the
+# session -- for two extra round trips. Not a good trade, and the auto value
+# correctly declines it.
+EAGER_OFFLOAD_WINDOW_SHARE = 32
+EAGER_OFFLOAD_FLOOR = 1_000
+
+
+def eager_offload_tokens(cfg: "Config") -> int:
+    """Result size, in tokens, that goes to disk the moment it arrives."""
+    if cfg.offload_eager_tokens:
+        return cfg.offload_eager_tokens
+    return max(EAGER_OFFLOAD_FLOOR, cfg.context_limit // EAGER_OFFLOAD_WINDOW_SHARE)
+
+
 def load_config(
     *,
     project_root: Path | None = None,
@@ -696,7 +726,7 @@ def load_config(
         compact_keep_tokens=max(0, int(data.get("compact_keep_tokens", 8_000))),
         offload=bool(data.get("offload", True)),
         offload_threshold_tokens=max(1, int(data.get("offload_threshold_tokens", 1_000))),
-        offload_eager_tokens=max(1, int(data.get("offload_eager_tokens", 8_000))),
+        offload_eager_tokens=max(0, int(data.get("offload_eager_tokens", 0))),
         context_file=data.get("context_file"),
         commit_trailer=data.get("commit_trailer"),
         save_sessions=bool(data.get("save_sessions", True)),

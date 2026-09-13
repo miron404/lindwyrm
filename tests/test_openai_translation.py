@@ -39,6 +39,24 @@ class TestOutboundMessages(unittest.TestCase):
         self.assertEqual([m["role"] for m in out], ["tool", "tool"])
         self.assertEqual([m["tool_call_id"] for m in out], ["t1", "t2"])
 
+    def test_text_alongside_tool_results_survives(self):
+        """A message can carry both. The text used to be dropped on the way
+        out, so anything said alongside a batch of results never arrived."""
+        msgs = [{"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "out1"},
+            {"type": "text", "text": "actually, stop there"}]}]
+        out = to_openai_messages("s", msgs)[1:]
+        # Tool messages first: OpenAI requires them directly after the
+        # assistant turn that asked for them.
+        self.assertEqual([m["role"] for m in out], ["tool", "user"])
+        self.assertEqual(out[1]["content"], "actually, stop there")
+
+    def test_a_results_only_message_adds_no_empty_user_turn(self):
+        msgs = [{"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "out1"}]}]
+        out = to_openai_messages("s", msgs)[1:]
+        self.assertEqual([m["role"] for m in out], ["tool"])
+
     def test_thinking_blocks_are_dropped(self):
         """Reasoning is not echoed back in OpenAI format -- some providers
         reject unknown fields."""

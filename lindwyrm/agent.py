@@ -19,7 +19,7 @@ from typing import Callable
 
 from . import openai_client
 from .client import StreamHandler, stream_message
-from .config import Config
+from .config import Config, eager_offload_tokens
 from .offload import CHARS_PER_TOKEN, estimate_text_tokens, get_store
 from .project import load_project_context
 from .tools import IMAGE_TOKENS, TOOL_SCHEMAS, ImageResult, run_tool
@@ -547,7 +547,7 @@ class Agent:
                 else:
                     if (self.cfg.offload and not is_error
                             and name in OFFLOADABLE_TOOLS
-                            and estimate_text_tokens(result) >= self.cfg.offload_eager_tokens):
+                            and estimate_text_tokens(result) >= eager_offload_tokens(self.cfg)):
                         result = self._offload_result_labelled(
                             self._tool_labels[tu["id"]], result)
                     content = result

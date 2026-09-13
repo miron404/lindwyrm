@@ -57,5 +57,19 @@ class TestMaxRetries(ConfigFileTestCase):
         self.assertEqual(self.load("max_retries = 0\n").max_retries, 1)
 
 
+class TestOffloadEagerTokens(ConfigFileTestCase):
+    def test_default_is_auto(self):
+        """0 means "derive it from the window"; it is not a real threshold."""
+        self.assertEqual(self.load().offload_eager_tokens, 0)
+
+    def test_an_explicit_value_is_kept(self):
+        self.assertEqual(
+            self.load("offload_eager_tokens = 12000\n").offload_eager_tokens, 12000)
+
+    def test_a_negative_value_falls_back_to_auto(self):
+        self.assertEqual(
+            self.load("offload_eager_tokens = -1\n").offload_eager_tokens, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

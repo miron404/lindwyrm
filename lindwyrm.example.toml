@@ -76,7 +76,10 @@ default_preset = "flash"
 # file is edited or deleted afterwards.
 # offload = true
 # offload_threshold_tokens = 1000  # move results this big once they age out
-# offload_eager_tokens = 8000      # move immediately: too big to sit in context
+# Move immediately: too big to sit in context. 0 (the default) means a
+# thirty-second of the context window, floor 1000 -- 4000 tokens on a 128K
+# model, 31250 on a 1M one. Set a number to pin it.
+# offload_eager_tokens = 0
 
 # Retries for transient failures (429 / 5xx / connect timeouts), with
 # exponential backoff and jitter. Only applies before any output has streamed.

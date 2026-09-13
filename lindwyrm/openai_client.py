@@ -58,16 +58,20 @@ def to_openai_messages(system: str, messages: list[dict]) -> list[dict]:
 
         if role == "user":
             tool_results = [b for b in content if b.get("type") == "tool_result"]
-            if tool_results:
-                for tr in tool_results:
-                    out.append({
-                        "role": "tool",
-                        "tool_call_id": tr.get("tool_use_id", ""),
-                        "content": _tool_content(tr.get("content", "")),
-                    })
-                continue
+            for tr in tool_results:
+                out.append({
+                    "role": "tool",
+                    "tool_call_id": tr.get("tool_use_id", ""),
+                    "content": _tool_content(tr.get("content", "")),
+                })
             text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
-            out.append({"role": "user", "content": text})
+            # One message can hold tool results AND text -- the Anthropic shape
+            # allows it, and both APIs accept it. The tool messages have to come
+            # first (OpenAI wants them directly after the assistant turn that
+            # asked for them), and the text follows as its own user message
+            # rather than being dropped on the floor.
+            if text or not tool_results:
+                out.append({"role": "user", "content": text})
 
         elif role == "assistant":
             text = "".join(b.get("text", "") for b in content if b.get("type") == "text")

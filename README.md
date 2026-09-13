@@ -268,7 +268,7 @@ they are.
 | setting | default | what it does |
 |---|---|---|
 | `offload` | `true` | master switch for moving results to disk |
-| `offload_eager_tokens` | `8000` | a single result this big goes to disk on arrival |
+| `offload_eager_tokens` | `0` | a single result this big goes to disk on arrival; `0` picks a share of the window |
 | `offload_threshold_tokens` | `1000` | old results this big are moved once over the threshold |
 | `auto_compact` | `true` | master switch for automatic reclaiming |
 | `compact_threshold` | `0.75` | share of the window that triggers it |
@@ -276,8 +276,18 @@ they are.
 | `compact_keep_tokens` | `8000` | size of the protected zone, capped at a quarter of the window |
 | `compact_keep_last` | `4` | messages always kept, however large they are |
 
-Lowering `offload_eager_tokens` much is a false economy: hand the model a
-stub for the file it just asked to read and it will simply read it again.
+`offload_eager_tokens` defaults to a thirty-second of the context window,
+with a floor of 1,000 — 4,000 tokens on a 128K model, 31,250 on a 1M one.
+A fixed number cannot be right for both: the same 8,000 tokens are half of a
+16K window and a rounding error in a 1M one.
+
+Set it lower than that and you are usually paying rather than saving. The
+model asked for this content and gets eight lines of it back, so anything it
+actually needs costs a `read_offloaded` round trip — and what you reclaimed
+was, thanks to caching, the cheapest part of the context. Measured on a real
+session against a 1M window: 111 tool results, 29K tokens between them in a
+166K context, 99.5% of input served from cache. Offloading the two largest
+would have freed 6% of the context for two extra round trips.
 
 ### Watching it
 

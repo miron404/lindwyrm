@@ -17,6 +17,7 @@ from pathlib import Path
 
 from lindwyrm import offload
 from lindwyrm.agent import Agent, protected_index
+from lindwyrm.config import Config, eager_offload_tokens
 from lindwyrm.offload import OffloadStore, estimate_text_tokens
 from lindwyrm.sandbox import SandboxError
 from lindwyrm.tools import tool_read_offloaded
@@ -296,6 +297,28 @@ class TestEstimate(unittest.TestCase):
     def test_scales_with_length(self):
         self.assertGreater(estimate_text_tokens("x" * 400),
                            estimate_text_tokens("x" * 4))
+
+
+class TestEagerThreshold(unittest.TestCase):
+    """The size at which a result goes to disk the moment it arrives."""
+
+    def cfg(self, **kw):
+        return Config(api_key="k", **kw)
+
+    def test_auto_scales_with_the_window(self):
+        """8,000 tokens is half a 16K window and noise in a 1M one, so one
+        fixed number is wrong at both ends."""
+        self.assertEqual(eager_offload_tokens(self.cfg(context_limit=128_000)), 4_000)
+        self.assertEqual(eager_offload_tokens(self.cfg(context_limit=1_000_000)), 31_250)
+
+    def test_auto_has_a_floor(self):
+        """Below the floor the stub costs about as much as the result."""
+        self.assertEqual(eager_offload_tokens(self.cfg(context_limit=16_000)), 1_000)
+        self.assertEqual(eager_offload_tokens(self.cfg(context_limit=1_000)), 1_000)
+
+    def test_an_explicit_setting_wins(self):
+        cfg = self.cfg(context_limit=1_000_000, offload_eager_tokens=8_000)
+        self.assertEqual(eager_offload_tokens(cfg), 8_000)
 
 
 if __name__ == "__main__":
