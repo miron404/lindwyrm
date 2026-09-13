@@ -75,10 +75,24 @@ jobs:
           ).group(1)
           alias = pathlib.Path("packaging/lwyrm/pyproject.toml")
           text = alias.read_text()
-          text = re.sub(r'^version = ".*"$', f'version = "{version}"',
+          # No `$` anchor: the version line carries a trailing comment, and
+          # anchoring to end-of-line silently matched nothing. The build then
+          # produced the PREVIOUS version, which skip-existing skipped without
+          # a word, so the run went green having published nothing.
+          text = re.sub(r'^version = "[^"]*"', f'version = "{version}"',
                         text, count=1, flags=re.M)
           text = re.sub(r'lindwyrm>=[0-9][^"]*', f'lindwyrm>={version}', text)
           alias.write_text(text)
+
+          # Never take the substitution on trust: a regex that quietly matches
+          # nothing is exactly how this broke.
+          stamped = re.search(r'^version = "([^"]*)"', text, flags=re.M).group(1)
+          if stamped != version:
+              raise SystemExit(
+                  f"::error::Failed to stamp the alias package: it still says "
+                  f"{stamped!r}, expected {version!r}. Publishing would have "
+                  f"skipped it silently."
+              )
           print(f"stamped alias package with version {version}")
           PY
 

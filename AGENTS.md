@@ -56,6 +56,12 @@ Each of these has already cost someone an afternoon:
 - **Tag the commit that bumps the version, and bump it last.** A tag that
   points a commit earlier builds the wrong tree. The workflow now fails on a
   mismatch; before that check existed it published a release with no license.
+- **`skip-existing` means a broken build publishes nothing, quietly.** It has
+  now cost two releases. The alias version is stamped by a regex in
+  `publish.yml`; when that regex matched nothing the alias was built at the
+  previous version and skipped in silence, with the run green. The workflow
+  verifies the stamp, and `tests/test_release_workflow.py` runs that same
+  script against the real file.
 - **A version on PyPI can never be re-uploaded.** Mistakes are fixed by
   releasing forward, never by moving a tag.
 - **DeepSeek's Anthropic endpoint returns 400 unless thinking blocks are
