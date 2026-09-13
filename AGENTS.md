@@ -92,6 +92,10 @@ Each of these has already cost someone an afternoon:
   never typed is also a turn boundary, so compaction can later cut the
   conversation there. `run_turn` returns False instead, and the caller says
   so.
+- **A session id is a creation stamp, not a recency key.** It never changes
+  after the session is made, so sorting the listing by id (or by filename)
+  ranks an abandoned session above the one in daily use, and `--continue`
+  resumes the wrong conversation. Order by `_last_saved()`.
 - **History may only be cut at a user-turn boundary.** Cutting elsewhere
   orphans a `tool_result` from its `tool_use` and both APIs reject it. See
   `is_turn_boundary`.

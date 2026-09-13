@@ -381,6 +381,10 @@ directory they ran in, so one checkout never resumes another's work.
 `/sessions` lists them, `--resume <id>` picks one, and `/clear` starts a new
 session without touching what is already saved.
 
+"Most recent" means last worked in, not last started. A session you opened
+this morning and abandoned does not outrank the one you have been in all
+week.
+
 What gets saved is the already-compacted history, so resuming costs no more
 than the session did when you left it. Offloaded results are restored too, so
 the `[offloaded: ...]` markers still resolve.

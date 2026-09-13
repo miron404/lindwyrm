@@ -114,6 +114,40 @@ class TestListing(SessionTestCase):
         listed = session.list_sessions("/p", root=self.root)
         self.assertEqual(listed[0]["id"], "20260202-000000-bbbb")
 
+    def test_order_follows_the_last_save_not_the_id(self):
+        """The id is when the session was created and never moves. Sorting by
+        it ranks a session you started today and abandoned above the one you
+        have been working in all week."""
+        self.make("20260101-000000-aaaa", "/p", "long-running")
+        self.make("20260202-000000-bbbb", "/p", "started today, abandoned")
+        # Now go back to the older session, as resuming it would.
+        time.sleep(0.01)
+        self.make("20260101-000000-aaaa", "/p", "long-running")
+
+        listed = session.list_sessions("/p", root=self.root)
+        self.assertEqual([s["id"] for s in listed],
+                         ["20260101-000000-aaaa", "20260202-000000-bbbb"])
+
+    def test_continue_resumes_the_session_last_worked_in(self):
+        self.make("20260101-000000-aaaa", "/p", "the real work")
+        self.make("20260202-000000-bbbb", "/p", "a detour")
+        time.sleep(0.01)
+        self.make("20260101-000000-aaaa", "/p", "the real work, continued")
+
+        self.assertEqual(session.latest_session_id("/p", root=self.root),
+                         "20260101-000000-aaaa")
+
+    def test_a_full_list_does_not_hide_the_most_recent(self):
+        """limit cuts from the bottom, so the one you want must sort to the
+        top -- by last save, not by when it was created."""
+        for i in range(5):
+            self.make(f"2026020{i}-000000-000{i}", "/p", f"m{i}")
+        time.sleep(0.01)
+        self.make("20260200-000000-0000", "/p", "the oldest, still in use")
+
+        listed = session.list_sessions("/p", limit=2, root=self.root)
+        self.assertEqual(listed[0]["id"], "20260200-000000-0000")
+
     def test_limit_is_respected(self):
         for i in range(5):
             self.make(f"s{i}", "/p", f"m{i}")

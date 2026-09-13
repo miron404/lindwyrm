@@ -28,9 +28,34 @@ TITLE_CHARS = 60
 
 
 def new_session_id() -> str:
-    """Sortable id: newest last alphabetically, which keeps listing simple."""
+    """Timestamped id, so the files read chronologically in a directory listing.
+
+    The stamp is when the session was CREATED and never changes afterwards, so
+    it is not a usable sort key for "most recently worked in" -- see
+    _last_saved().
+    """
     stamp = time.strftime("%Y%m%d-%H%M%S")
     return f"{stamp}-{random.randint(0x1000, 0xffff):04x}"
+
+
+def _last_saved(path: Path) -> tuple[float, str]:
+    """When the session was last written, for ordering the listing.
+
+    Deliberately the file's mtime rather than the id: the id records when the
+    session was created, so ordering by it ranks a session started this
+    morning and abandoned above one started last week and worked in ever
+    since. --continue took the top of that list, which is how it could resume
+    a conversation the user had already walked away from. mtime is also what
+    sweep_sessions retires on, so the listing and the retention window now
+    measure the same thing.
+
+    The name breaks ties: two sessions saved within the same mtime tick would
+    otherwise come back in whatever order the directory happened to yield.
+    """
+    try:
+        return (path.stat().st_mtime, path.name)
+    except OSError:
+        return (0.0, path.name)
 
 
 def session_path(session_id: str, root: Path | None = None) -> Path:
@@ -110,7 +135,7 @@ def list_sessions(project_root: str | Path | None = None, *, limit: int = 20,
 
     found: list[dict] = []
     try:
-        entries = sorted(directory.glob("*.json"), reverse=True)
+        entries = sorted(directory.glob("*.json"), key=_last_saved, reverse=True)
     except OSError:
         return []
     for path in entries:
