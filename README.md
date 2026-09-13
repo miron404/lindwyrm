@@ -451,6 +451,20 @@ API keys are never read from the config file itself — only from the
 environment or a `key_file` you point at, so a committed config can't leak
 one.
 
+### How long one turn may run
+
+A single request can run many model→tool cycles. `max_tool_steps` (default
+`50`) caps them, so a model stuck in a loop can't burn your budget
+unattended. It is a backstop, not a budget: a genuinely long job — a port, a
+refactor across thirty files — can reach it with work still to do. When that
+happens lindwyrm says so, and "continue" picks up exactly where it stopped,
+with the whole history intact.
+
+```toml
+max_tool_steps = 200
+max_retries = 4     # retries on 429/5xx and connection errors
+```
+
 ## Security notes and limits
 
 - `bash` runs through the shell. The denylist is a backstop, not a jail — the

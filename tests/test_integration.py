@@ -61,13 +61,23 @@ class FakeProvider(BaseHTTPRequestHandler):
         FakeProvider.requests.append(json.loads(body or b"{}"))
 
         status, payload = FakeProvider.script.pop(0)
+        # A (body, claimed_length) pair means "promise more than you send, then
+        # hang up" -- the way a real connection dies halfway through an answer.
+        cut_short = isinstance(payload, tuple)
+        claimed = 0
+        if cut_short:
+            payload, claimed = payload
         self.send_response(status)
         if status == 200:
             self.send_header("content-type", "text/event-stream")
         else:
             self.send_header("content-type", "application/json")
+        if cut_short:
+            self.send_header("content-length", str(claimed))
         self.end_headers()
         self.wfile.write(payload)
+        if cut_short:
+            self.close_connection = True
 
     def log_message(self, *a):
         pass  # keep test output clean
@@ -187,6 +197,116 @@ class TestRetry(ProviderTestCase):
         with self.assertRaises(lw_http.APIError):
             agent.run_turn(on_text=lambda _: None)
         self.assertEqual(len(FakeProvider.requests), 3)
+
+
+class TestInterruptedStream(ProviderTestCase):
+    """A connection that dies partway through an answer must not be replayed."""
+
+    def test_a_drop_after_output_is_not_retried(self):
+        half = anthropic_stream(text="first half")[:-len(sse("message_stop", {}))]
+        FakeProvider.script = [
+            (200, (half, len(half) + 999)),          # promises more, hangs up
+            (200, anthropic_stream(text="first half and the rest")),
+        ]
+        agent = Agent(self.cfg)
+        agent.add_user("hi")
+        seen = []
+        with self.assertRaises(lw_http.APIError):
+            agent.run_turn(on_text=seen.append)
+
+        # One request only: retrying would stream the answer a second time,
+        # printing the opening twice and paying for the whole thing again.
+        self.assertEqual(len(FakeProvider.requests), 1)
+        self.assertEqual("".join(seen), "first half")
+
+    def test_a_drop_before_any_output_is_retried(self):
+        FakeProvider.script = [
+            (200, (b"", 999)),                       # 200, then silence
+            (200, anthropic_stream(text="recovered")),
+        ]
+        agent = Agent(self.cfg)
+        agent.add_user("hi")
+        seen = []
+        agent.run_turn(on_text=seen.append)
+
+        # Nothing had been shown, so a second attempt costs the user nothing.
+        self.assertEqual(len(FakeProvider.requests), 2)
+        self.assertEqual("".join(seen), "recovered")
+
+
+class TestStepCeiling(ProviderTestCase):
+    """What happens when a turn runs longer than max_tool_steps."""
+
+    def setUp(self):
+        super().setUp()
+        (Path(self.cfg.project_root) / "f.txt").write_text("x")
+
+    def _endless_tool_calls(self, n):
+        FakeProvider.script = [
+            (200, anthropic_stream(tool=("read_file", {"path": "f.txt"})))
+        ] * n
+
+    def test_run_turn_reports_it_was_cut_off(self):
+        self.cfg.max_tool_steps = 3
+        self._endless_tool_calls(3)
+        agent = Agent(self.cfg)
+        agent.add_user("go")
+
+        self.assertIs(agent.run_turn(on_text=lambda _: None), False)
+        self.assertEqual(len(FakeProvider.requests), 3)
+
+    def test_a_finished_turn_reports_success(self):
+        FakeProvider.script = [(200, anthropic_stream(text="done"))]
+        agent = Agent(self.cfg)
+        agent.add_user("go")
+        self.assertIs(agent.run_turn(on_text=lambda _: None), True)
+
+    def test_nothing_is_written_into_the_history_as_the_user(self):
+        """The stop is lindwyrm's, and must not be dressed up as the user's.
+
+        A fabricated user message is also a turn boundary, so compaction could
+        later cut the conversation at a sentence nobody typed.
+        """
+        self.cfg.max_tool_steps = 2
+        self._endless_tool_calls(2)
+        agent = Agent(self.cfg)
+        agent.add_user("go")
+        agent.run_turn(on_text=lambda _: None)
+
+        last = agent.messages[-1]
+        self.assertEqual(last["role"], "user")
+        self.assertTrue(all(b["type"] == "tool_result" for b in last["content"]),
+                        last["content"])
+        self.assertNotIn("too many tool steps", json.dumps(agent.messages))
+
+    def test_the_conversation_can_be_continued_afterwards(self):
+        self.cfg.max_tool_steps = 2
+        self._endless_tool_calls(2)
+        agent = Agent(self.cfg)
+        agent.add_user("go")
+        agent.run_turn(on_text=lambda _: None)
+
+        FakeProvider.script = [(200, anthropic_stream(text="carrying on"))]
+        agent.add_user("continue")
+        seen = []
+        self.assertIs(agent.run_turn(on_text=seen.append), True)
+        self.assertEqual("".join(seen), "carrying on")
+
+    def test_the_ceiling_is_configurable(self):
+        self.cfg.max_tool_steps = 5
+        self._endless_tool_calls(5)
+        agent = Agent(self.cfg)
+        agent.add_user("go")
+        agent.run_turn(on_text=lambda _: None)
+        self.assertEqual(len(FakeProvider.requests), 5)
+
+    def test_an_explicit_argument_overrides_the_setting(self):
+        self.cfg.max_tool_steps = 50
+        self._endless_tool_calls(2)
+        agent = Agent(self.cfg)
+        agent.add_user("go")
+        agent.run_turn(on_text=lambda _: None, max_steps=2)
+        self.assertEqual(len(FakeProvider.requests), 2)
 
 
 class TestAgentLoop(ProviderTestCase):

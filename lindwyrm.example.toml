@@ -82,6 +82,11 @@ default_preset = "flash"
 # exponential backoff and jitter. Only applies before any output has streamed.
 # max_retries = 4
 
+# How many model->tool cycles one request may run before lindwyrm stops it.
+# A backstop against a model stuck in a loop, not a budget -- a long job can
+# reach it legitimately, in which case you're told and "continue" resumes.
+# max_tool_steps = 50
+
 # --- Proxy ------------------------------------------------------------------
 # Off by default: traffic goes straight out, and HTTP_PROXY/HTTPS_PROXY/
 # ALL_PROXY are IGNORED unless you ask for them with "system". A proxy is an

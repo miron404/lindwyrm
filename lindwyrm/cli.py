@@ -485,7 +485,7 @@ def _do_turn(cfg: Config, agent: Agent, renderer: Renderer) -> None:
     cost_before = agent.session_cost()
     try:
         _emit(f"[dim]{cfg.model}[/dim]" if _console else cfg.model)
-        agent.run_turn(
+        finished = agent.run_turn(
             on_text=renderer.on_text,
             on_thinking=renderer.on_thinking if cfg.thinking else None,
             on_tool=renderer.on_tool,
@@ -495,6 +495,14 @@ def _do_turn(cfg: Config, agent: Agent, renderer: Renderer) -> None:
             on_notice=lambda msg: print(f"  {DIM}{msg}{RESET}"),
         )
         renderer.end_turn()
+        if not finished:
+            # The turn was cut off mid-work by the step ceiling. Saying so is
+            # the whole point: an answer that simply stops looks like the model
+            # finished, and the user goes on believing the job is done.
+            print(f"\n{YELLOW}(stopped after {cfg.max_tool_steps} tool steps "
+                  f"-- the work isn't finished){RESET}\n"
+                  f"  {DIM}say \"continue\" to pick up where it left off, or "
+                  f"raise max_tool_steps in your config{RESET}\n")
         _turn_summary(cfg, agent, cost_before)
         _persist(cfg, agent)
     except UserQuit:

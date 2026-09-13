@@ -73,6 +73,13 @@ Each of these has already cost someone an afternoon:
 - **Image payloads must not be measured literally.** Base64 of a screenshot
   is millions of characters but costs the model about 1024 tokens;
   `_measurable()` swaps them for a marker before estimating context.
+- **A stream is never retried once an event has reached the caller.** The
+  answer would be replayed from the top: printed twice, billed twice. See
+  `emitted` in `stream_sse`.
+- **Nothing is ever appended to history under the user's role.** A line they
+  never typed is also a turn boundary, so compaction can later cut the
+  conversation there. `run_turn` returns False instead, and the caller says
+  so.
 - **History may only be cut at a user-turn boundary.** Cutting elsewhere
   orphans a `tool_result` from its `tool_use` and both APIs reject it. See
   `is_turn_boundary`.

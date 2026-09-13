@@ -136,6 +136,7 @@ def stream_sse(
     last_error: str = "unknown error"
 
     for attempt in range(1, max_attempts + 1):
+        emitted = False
         try:
             with client.stream("POST", url, headers=headers, json=body) as resp:
                 if resp.status_code != 200:
@@ -149,14 +150,19 @@ def stream_sse(
                         continue
                     raise APIError(f"HTTP {resp.status_code}: {detail}")
 
-                # Status is good; from here on the caller may start seeing
-                # output, so a failure must not be retried.
-                yield from _iter_events(resp)
+                # Status is good. A drop before the first event is still safe
+                # to retry -- nothing has been shown and nothing generated. But
+                # once an event has gone out, retrying would replay the answer
+                # from the top: the user sees the first half twice, and the
+                # second request is billed in full. So `emitted` decides.
+                for event in _iter_events(resp):
+                    emitted = True
+                    yield event
                 return
 
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
                 httpx.RemoteProtocolError, httpx.ProxyError) as e:
-            if attempt >= max_attempts:
+            if emitted or attempt >= max_attempts:
                 raise APIError(_redact(f"{type(e).__name__}: {e}", proxy)) from e
             last_error = type(e).__name__
             delay = backoff_delay(attempt)

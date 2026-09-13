@@ -471,9 +471,16 @@ class Agent:
         on_tool_output: Callable[[str], None] | None = None,
         on_retry: Callable[[int, str, float], None] | None = None,
         on_notice: Callable[[str], None] | None = None,
-        max_steps: int = 50,
-    ) -> None:
-        """Run model<->tool cycles until the model is done (end_turn)."""
+        max_steps: int | None = None,
+    ) -> bool:
+        """Run model<->tool cycles until the model is done (end_turn).
+
+        Returns True if the model finished, False if it ran into the step
+        ceiling with work still in progress -- callers are expected to check,
+        because that case is otherwise indistinguishable from a finished turn
+        and leaves the user staring at an answer that just stops.
+        """
+        max_steps = max_steps or self.cfg.max_tool_steps
         for _ in range(max_steps):
             if self.should_compact():
                 # Offloading first: it is cheap, reversible, and often enough
@@ -511,7 +518,7 @@ class Agent:
 
             tool_uses = [b for b in handler.content if b.get("type") == "tool_use"]
             if not tool_uses:
-                return  # end_turn
+                return True  # end_turn
 
             tool_results = []
             for tu in tool_uses:
@@ -560,8 +567,11 @@ class Agent:
                     "is_error": is_error,
                 })
             self.messages.append({"role": "user", "content": tool_results})
-        # Hit the step ceiling.
-        self.messages.append({
-            "role": "user",
-            "content": [{"type": "text", "text": "(stopped: too many tool steps)"}],
-        })
+
+        # Hit the ceiling. Nothing is written into the history: a line put
+        # there under the user's name is a message they never sent, and it
+        # counts as a turn boundary, so compaction could later cut the
+        # conversation at a sentence lindwyrm invented. The history simply
+        # ends after the last tool result, which is a shape both APIs accept
+        # and which the model can carry straight on from.
+        return False

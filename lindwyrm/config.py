@@ -486,6 +486,10 @@ class Config:
 
     # Transient-failure retries (429/5xx, connect and read errors).
     max_retries: int = 4
+    # How many model->tool cycles one request may run before lindwyrm stops
+    # it. A backstop against a loop, not a budget: hitting it means the work
+    # was simply long, so the user is told and can say the word to continue.
+    max_tool_steps: int = 50
     # Context management. When the input tokens the API reports for a turn
     # exceed context_limit * compact_threshold, older history is summarized
     # away. Every token in history is re-sent (and re-billed) on every single
@@ -683,6 +687,7 @@ def load_config(
         markdown=bool(data.get("markdown", True)),
         thinking_display=str(data.get("thinking_display", "peek")),
         max_retries=max(1, int(data.get("max_retries", 4))),
+        max_tool_steps=max(1, int(data.get("max_tool_steps", 50))),
         context_limit=int(data.get("context_limit", preset.context_limit)),
         auto_compact=bool(data.get("auto_compact", True)),
         compact_threshold=float(data.get("compact_threshold", 0.75)),
