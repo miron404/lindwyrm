@@ -45,6 +45,14 @@ def normalize_permission(val: str) -> str:
     return v
 
 
+_STRICTNESS = {"allow": 0, "confirm": 1, "deny": 2}
+
+
+def stricter(a: str, b: str) -> str:
+    """The more restrictive of two permission levels."""
+    return a if _STRICTNESS[a] >= _STRICTNESS[b] else b
+
+
 DEFAULT_BASE_URL = "https://api.deepseek.com/anthropic"
 ANTHROPIC_VERSION = "2023-06-01"
 
@@ -368,7 +376,12 @@ class Policy:
 
     For each operation (read/write/delete) the effective level is found by:
       1. Take the most specific matching PathRule that sets that operation.
-      2. If none matches, use the global default.
+      2. If none matches, use the global default -- for a read outside the
+         project root, the stricter of that and `read_outside`.
+
+    `read_outside` exists because read=allow used to cover the whole disk:
+    ~/.ssh, ~/.aws and the API key file were one silent read_file away from
+    being sent to the provider. Inside the project reads stay frictionless.
 
     bash is intentionally NOT part of this path system -- a shell command isn't
     bound to a path and could escape any boundary, so it stays a single global
@@ -388,6 +401,20 @@ class Policy:
     )
 
     read_only: bool = False
+
+    # Reads outside `root` are held to at least this level. None for `root`
+    # means no project boundary is known (tests that build a bare Policy).
+    read_outside: Permission = "confirm"
+    root: Path | None = None
+
+    def inside_root(self, target: Path) -> bool:
+        if self.root is None:
+            return True
+        try:
+            rt = target.resolve()
+        except (OSError, RuntimeError):
+            rt = target
+        return rt == self.root or self.root in rt.parents
 
     def _matching_rules(self, target: Path) -> list[PathRule]:
         try:
@@ -414,7 +441,10 @@ class Policy:
             val = getattr(r, op)
             if val is not None:
                 return val
-        return getattr(self, op)
+        level = getattr(self, op)
+        if op == "read" and not self.inside_root(target):
+            level = stricter(level, self.read_outside)
+        return level
 
     def set_rule(
         self,
@@ -590,27 +620,50 @@ def _read_toml(path: Path) -> dict:
         return {}
 
 
-def _build_policy(data: dict, project_root: Path) -> Policy:
-    p = Policy()
-    pol = data.get("policy", {})
+def _perm(field_name: str, raw) -> str:
+    v = normalize_permission(str(raw))
+    if v not in ("allow", "confirm", "deny"):
+        raise SystemExit(
+            f"policy.{field_name} must be allow/confirm/deny (or forbid), got {raw!r}"
+        )
+    return v
 
-    def _perm(field_name: str, raw) -> str:
-        v = normalize_permission(str(raw))
-        if v not in ("allow", "confirm", "deny"):
-            raise SystemExit(
-                f"policy.{field_name} must be allow/confirm/deny (or forbid), got {raw!r}"
-            )
-        return v
 
-    for fld in ("read", "write", "delete", "bash"):
-        if fld in pol:
-            setattr(p, fld, _perm(fld, pol[fld]))
+def _apply_policy(p: Policy, pol: dict, project_root: Path, *,
+                  tighten_only: bool = False) -> list[str]:
+    """Layer one config file's [policy] table onto `p`.
+
+    Layered rather than replaced: a project file that set a single level
+    used to drop the user's whole table, denylist and rules included.
+
+    With `tighten_only` -- a project file nobody has vouched for -- every
+    setting may only make things stricter. Returns what was refused.
+    """
+    refused: list[str] = []
+
+    for fld in ("read", "write", "delete", "bash", "read_outside"):
+        if fld not in pol:
+            continue
+        level = _perm(fld, pol[fld])
+        current = getattr(p, fld)
+        if tighten_only and stricter(level, current) != level:
+            refused.append(f"policy.{fld} = {level!r} (looser than {current!r})")
+            continue
+        setattr(p, fld, level)
 
     if "bash_allowlist" in pol:
-        p.bash_allowlist = list(pol["bash_allowlist"])
+        if tighten_only:
+            refused.append("policy.bash_allowlist")
+        else:
+            p.bash_allowlist = list(dict.fromkeys(p.bash_allowlist + list(pol["bash_allowlist"])))
     if "bash_denylist" in pol:
-        p.bash_denylist = list(set(p.bash_denylist) | set(pol["bash_denylist"]))
-    p.read_only = bool(pol.get("read_only", False))
+        p.bash_denylist = list(dict.fromkeys(p.bash_denylist + list(pol["bash_denylist"])))
+    if "read_only" in pol:
+        wanted = bool(pol["read_only"])
+        if tighten_only and not wanted and p.read_only:
+            refused.append("policy.read_only = false")
+        else:
+            p.read_only = wanted
 
     for entry in pol.get("rules", []):
         if "path" not in entry:
@@ -618,13 +671,93 @@ def _build_policy(data: dict, project_root: Path) -> Policy:
         raw_path = Path(os.path.expanduser(entry["path"]))
         if not raw_path.is_absolute():
             raw_path = project_root / raw_path
+        raw_path = raw_path.resolve()
         kwargs = {}
         for op in ("read", "write", "delete"):
-            if op in entry:
-                kwargs[op] = _perm(f"rules.{op}", entry[op])
-        p.set_rule(raw_path.resolve(), **kwargs)
+            if op not in entry:
+                continue
+            level = _perm(f"rules.{op}", entry[op])
+            if tighten_only:
+                # Judged against what the path gets right now, since a rule
+                # on a subfolder outranks a stricter one on its parent.
+                current = p.effective(op, raw_path)
+                if stricter(level, current) != level:
+                    refused.append(f"policy.rules {entry['path']} {op} = {level!r}")
+                    continue
+            kwargs[op] = level
+        if kwargs:
+            p.set_rule(raw_path, **kwargs)
 
+    return refused
+
+
+def _build_policy(data: dict, project_root: Path) -> Policy:
+    p = Policy(root=project_root)
+    _apply_policy(p, data.get("policy", {}), project_root)
     return p
+
+
+# ---------------------------------------------------------------------------
+# Project config trust
+# ---------------------------------------------------------------------------
+#
+# ./.lindwyrm.toml arrives with `git clone`. Merged with full authority it
+# could point the built-in preset's base_url at its own server (which then
+# receives your API key in a header), name any file on disk as context_file
+# (which then rides along in the system prompt), and set bash = "allow".
+# So unless the project is listed in the user config's trusted_projects, a
+# project file only gets the settings that can't hurt you, and policy that
+# only tightens.
+
+# Never taken from an untrusted project file.
+USER_ONLY_KEYS = frozenset({
+    "base_url",          # where the API key is sent
+    "key_file",          # which file is read and sent as the key
+    "presets",           # base_url, key sources, extra_body
+    "proxy", "no_proxy",  # where traffic is routed
+    "audit_log",         # a path lindwyrm appends to
+    "session_retention_days",  # sweeps sessions of every project
+    "trusted_projects",
+})
+
+
+def is_trusted_project(root: Path, trusted) -> bool:
+    if isinstance(trusted, str):
+        trusted = [trusted]
+    for raw in trusted or []:
+        try:
+            base = Path(os.path.expanduser(str(raw))).resolve()
+        except (OSError, RuntimeError):
+            continue
+        if root == base or base in root.parents:
+            return True
+    return False
+
+
+def _untrusted_project_settings(proj: dict, root: Path) -> tuple[dict, list[str]]:
+    """The part of an untrusted project file that is safe to apply, and the
+    names of what was dropped."""
+    accepted: dict = {}
+    refused: list[str] = []
+    for key, value in proj.items():
+        if key == "policy":
+            continue  # applied separately, tighten-only
+        if key in USER_ONLY_KEYS:
+            refused.append(key)
+            continue
+        if key == "context_file":
+            path = Path(os.path.expanduser(str(value)))
+            if not path.is_absolute():
+                path = root / path
+            try:
+                inside = root in path.resolve().parents
+            except (OSError, RuntimeError):
+                inside = False
+            if not inside:
+                refused.append(f"context_file (outside the project: {value})")
+                continue
+        accepted[key] = value
+    return accepted, refused
 
 
 # One result in 32 windows-worth. Offloading on arrival is free -- the stub is
@@ -666,12 +799,24 @@ def load_config(
     user_cfg = Path(os.path.expanduser("~/.config/lindwyrm/config.toml"))
     proj_cfg = root / ".lindwyrm.toml"
 
-    data: dict = {}
-    data.update(_read_toml(user_cfg))
-    data.update(_read_toml(proj_cfg))  # project overrides user
+    user_data = _read_toml(user_cfg)
+    proj_data = _read_toml(proj_cfg)
+    policy = _build_policy(user_data, root)
+    if is_trusted_project(root, user_data.get("trusted_projects")):
+        data = {**user_data, **proj_data}  # project overrides user
+        _apply_policy(policy, proj_data.get("policy", {}), root)
+    else:
+        accepted, refused = _untrusted_project_settings(proj_data, root)
+        data = {**user_data, **accepted}
+        refused += _apply_policy(policy, proj_data.get("policy", {}), root,
+                                 tighten_only=True)
+        if refused:
+            print(f"warning: {proj_cfg} belongs to a project not listed in "
+                  f"trusted_projects, so these settings in it were ignored: "
+                  f"{', '.join(refused)}. To apply them, add the project to "
+                  f"trusted_projects in {user_cfg}.", file=sys.stderr)
 
     presets = _build_presets(data)
-    policy = _build_policy(data, root)
     global_key_file = data.get("key_file")
     global_proxy = parse_proxy(data["proxy"], "proxy") if "proxy" in data else PROXY_DIRECT
     raw_no_proxy = data.get("no_proxy", [])

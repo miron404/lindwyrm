@@ -85,6 +85,13 @@ In the REPL: `/model` `/presets` `/thinking` `/think` `/markdown` `/perm`
 
 **Ctrl+C** stops whatever is running and clears the line you were typing, the
 way a shell does. Press it twice, or use **Ctrl+D** or `/exit`, to leave.
+Stopping a turn — Ctrl+C, or `q` at a prompt — keeps the session usable: the
+tool calls it cut short are recorded as interrupted, and the next message
+carries on from there.
+
+With `-p` the exit status says how the turn ended: `0` finished, `1` an API
+or other error, `3` incomplete (the step ceiling, or a reply cut off at
+`max_tokens`), `130` interrupted.
 
 ## Contents
 
@@ -103,7 +110,9 @@ which provider is active.
 
 - `bash` streams output line by line as the command runs, with stdout and
   stderr interleaved in the order they actually happened, and kills the whole
-  process tree on timeout or Ctrl+C.
+  process tree on timeout or Ctrl+C. stdin is closed, so a command that
+  prompts gets end-of-file at once instead of waiting out the timeout.
+- `edit_file` keeps a file's line endings: a CRLF file stays CRLF.
 - `edit_file` requires a unique match by default; when the text appears
   several times the error names the lines that matched, so the next attempt
   has something to go on. `replace_all` changes every occurrence.
@@ -129,13 +138,25 @@ first) or `deny` (blocked), from a global default plus per-path rules. The
 most specific rule wins, so you can open a folder broadly and still lock a
 subfolder inside it. Defaults: read=allow, write=confirm, delete=confirm.
 
+Reads **outside the project** are held to at least `read_outside` (default
+`confirm`), so `~/.ssh` or your key file can't be read and sent to the
+provider without you seeing it. A path rule still wins — `[[policy.rules]]`
+with `path = "~/docs"` and `read = "allow"` opens that folder — and
+`read_outside = "allow"` restores the old behaviour. Answering `[a]lways`
+covers paths inside the project only.
+
 `../` and symlinks are resolved **before** matching, so a link can't dodge a
 rule — and the confirmation prompt shows the real destination, not the path
 that was typed.
 
 `bash` sits outside this system, because a shell command isn't bound to a
 path: it has one global level (default confirm), an always-on denylist and an
-optional allowlist for harmless commands. Set rules in config under
+optional allowlist for harmless commands. An allowlist entry matches the
+command itself plus plain arguments — `ls` allows `ls -la src`, but anything
+containing `;`, `&`, `|`, `<`, `>`, `$`, backticks or parentheses is asked
+about, since `ls && rm -rf ~` starts with `ls` too. Confirmation prompts show
+control characters as escapes, so a command can't repaint itself into
+something harmless-looking. Set rules in config under
 `[[policy.rules]]`, or during a session with
 `/perm src write=allow delete=confirm`.
 
@@ -429,7 +450,19 @@ nothing has been streamed yet — never mid-answer.
 ## Configuration
 
 Copy `lindwyrm.example.toml` to `./.lindwyrm.toml` (project) or
-`~/.config/lindwyrm/config.toml` (user). Project settings override user ones.
+`~/.config/lindwyrm/config.toml` (user). Project settings override user ones
+— within limits, because a project file arrives with `git clone`. Unless the
+project is listed in your user config's `trusted_projects`, its
+`.lindwyrm.toml` cannot set `base_url`, `presets`, `key_file`, `proxy`,
+`no_proxy`, `audit_log` or `session_retention_days`, cannot name a
+`context_file` outside the project, and its `[policy]` can only make things
+stricter. Whatever it tried is listed in a warning at startup.
+
+```toml
+# ~/.config/lindwyrm/config.toml
+trusted_projects = ["~/work"]   # your own checkouts: project files apply in full
+```
+
 The example file documents every option; the essentials:
 
 ```toml
@@ -481,17 +514,23 @@ max_retries = 4     # retries on 429/5xx and connection errors
 
 ## Security notes and limits
 
-- `bash` runs through the shell. The denylist is a backstop, not a jail — the
-  real protection is that it defaults to `confirm`, so you see every command
-  before it runs. For stronger isolation, run lindwyrm in a container.
+- `bash` runs through the shell. The denylist is a backstop, not a jail — it
+  ignores quotes and backslashes (`c''url` is still `curl`), but
+  `$(printf cu)rl` gets past any list. The real protection is that bash
+  defaults to `confirm`, so you see every command before it runs. For
+  stronger isolation, run lindwyrm in a container.
+- A cloned repo is untrusted input: its `.lindwyrm.toml` is restricted (see
+  [Configuration](#configuration)), and an `AGENTS.md` that is a symlink out
+  of the project is not read.
 - Path permissions guard against strayed file operations, and resolve
   symlinks and `../` before matching. They are not a defense against a write
   you confirm yourself.
 - Summarizing is lossy by nature: it replaces older turns with a model-written
   summary, cutting only at user-turn boundaries so tool calls are never split
   from their results. Offloading, which runs first, loses nothing — the full
-  text stays under `~/.local/share/lindwyrm/offload/` and is swept after 7
-  days. An offloaded result is a *snapshot*, which is exactly why it is copied
+  text stays under `~/.local/share/lindwyrm/offload/` (`0600` files in
+  `0700` directories) for as long as its session is saved; without one —
+  `--no-save`, or a crash — it is removed at exit or swept after 7 days. An offloaded result is a *snapshot*, which is exactly why it is copied
   rather than re-read later: the file may have changed since.
 
 ## Tests

@@ -11,6 +11,7 @@ import tempfile
 import time
 import pathlib
 import unittest
+from unittest import mock
 
 from helpers import make_config
 from pathlib import Path
@@ -157,6 +158,17 @@ class TestMicrocompact(StoreTestCase):
         body = agent.messages[2]["content"][0]["content"]
         self.assertTrue(body.startswith("[offloaded:"))
         self.assertIn("read_file big.py", body)
+
+    def test_the_stale_measurement_is_dropped_not_replaced_by_a_guess(self):
+        """An estimate stored as last_input_tokens was shown by /context as
+        "measured" -- and it left out the tool schemas, so it read low."""
+        from lindwyrm.agent import estimate_tokens
+        agent = self.make_agent()
+        agent.last_input_tokens = 50_000
+        agent.microcompact()
+        self.assertEqual(agent.last_input_tokens, 0)
+        self.assertGreater(agent.context_tokens(),
+                           estimate_tokens(agent.messages, agent.system_prompt))
 
     def test_offloaded_content_is_recoverable(self):
         agent = self.make_agent()
@@ -319,6 +331,53 @@ class TestEagerThreshold(unittest.TestCase):
     def test_an_explicit_setting_wins(self):
         cfg = self.cfg(context_limit=1_000_000, offload_eager_tokens=8_000)
         self.assertEqual(eager_offload_tokens(cfg), 8_000)
+
+
+
+class TestPrivacy(StoreTestCase):
+    def test_files_are_private(self):
+        """They hold what a session file holds, which is written 0600."""
+        import os
+        import stat
+        entry = self.store.put("secret output", "bash env")
+        self.assertEqual(stat.S_IMODE(os.stat(entry.path).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(entry.path.parent).st_mode), 0o700)
+
+
+class TestSweepKeepsSavedSessions(unittest.TestCase):
+    def test_a_saved_sessions_directory_is_kept_however_old(self):
+        """mtime only moves on a new offload, so age alone swept sessions
+        that were still being resumed, and their stubs pointed at nothing."""
+        import os
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            kept, orphan = root / "kept", root / "orphan"
+            kept.mkdir()
+            orphan.mkdir()
+            ancient = time.time() - 30 * 86400
+            os.utime(kept, (ancient, ancient))
+            os.utime(orphan, (ancient, ancient))
+            offload.sweep_old_sessions(root, max_age_days=7, keep={"kept"})
+            self.assertTrue(kept.exists())
+            self.assertFalse(orphan.exists())
+
+    def test_get_store_no_longer_sweeps_blindly(self):
+        offload.set_store(None)
+        try:
+            with mock.patch.object(offload, "sweep_old_sessions") as sweep:
+                offload.get_store()
+            sweep.assert_not_called()
+        finally:
+            offload.set_store(None)
+
+    def test_discard_store_removes_its_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = OffloadStore(root=Path(d) / "s")
+            entry = store.put("x" * 10, "t")
+            offload.set_store(store)
+            offload.discard_store()
+            self.assertFalse(entry.path.exists())
+            self.assertIsNone(offload._store)
 
 
 if __name__ == "__main__":

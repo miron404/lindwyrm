@@ -75,6 +75,13 @@ class StreamHandler:
         self.output_tokens: int = 0
         self.cache_read_tokens: int = 0
         self.cache_write_tokens: int = 0
+        # Set by message_stop. A stream that ends without it was cut off,
+        # and what arrived is not the model's whole answer.
+        self.complete: bool = False
+        # tool_use ids whose arguments weren't valid JSON -- typically cut
+        # off by max_tokens. Kept beside the blocks, not inside them, since
+        # any extra key in a block would be echoed back over the wire.
+        self.bad_tool_input: set[str] = set()
         self._blocks: dict[int, dict] = {}
 
     def feed(self, event_type: str, data: dict) -> Iterator[tuple[str, str]]:
@@ -116,14 +123,9 @@ class StreamHandler:
             elif dtype == "input_json_delta":
                 block["_partial_json"] += delta.get("partial_json", "")
         elif event_type == "content_block_stop":
-            idx = data["index"]
-            block = self._blocks.get(idx)
+            block = self._blocks.get(data["index"])
             if block and block.get("type") == "tool_use":
-                raw = block.pop("_partial_json", "")
-                try:
-                    block["input"] = json.loads(raw) if raw else {}
-                except json.JSONDecodeError:
-                    block["input"] = {}
+                self._parse_tool_input(block)
         elif event_type == "message_delta":
             self.stop_reason = data.get("delta", {}).get("stop_reason", self.stop_reason)
             usage = data.get("usage") or {}
@@ -133,9 +135,19 @@ class StreamHandler:
             # Finalize content in index order, stripping internal scratch keys.
             self.content = []
             for i in sorted(self._blocks):
-                b = dict(self._blocks[i])
-                b.pop("_partial_json", None)
-                self.content.append(b)
+                b = self._blocks[i]
+                if "_partial_json" in b:  # never got its content_block_stop
+                    self._parse_tool_input(b)
+                self.content.append(dict(b))
+            self.complete = True
+
+    def _parse_tool_input(self, block: dict) -> None:
+        raw = block.pop("_partial_json", "")
+        try:
+            block["input"] = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            block["input"] = {}
+            self.bad_tool_input.add(block.get("id", ""))
 
 
 def stream_message(
@@ -170,4 +182,9 @@ def stream_message(
                 on_text(chunk)
             elif kind == "thinking" and on_thinking:
                 on_thinking(chunk)
+    if not handler.complete:
+        # Returning what arrived would store half an answer -- or an empty
+        # one, which the next request is rejected over -- as if it were done.
+        raise APIError("the response stream ended before the reply was "
+                       "complete (connection cut?); nothing from it was kept")
     return handler

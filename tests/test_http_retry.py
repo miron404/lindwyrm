@@ -1,6 +1,9 @@
 """Retry/backoff behaviour, exercised without touching the network."""
 
 import unittest
+from unittest import mock
+
+import httpx
 
 from lindwyrm import http as lw_http
 
@@ -60,6 +63,49 @@ class TestClientReuse(unittest.TestCase):
         lw_http.get_client()
         lw_http.close_client()
         lw_http.close_client()  # must not raise
+
+
+
+class TestNetworkErrors(unittest.TestCase):
+    """httpx.ReadError -- a reset mid-response -- used to escape both the
+    retry and the APIError wrapper and surface as a raw exception."""
+
+    def tearDown(self):
+        lw_http.close_client()
+
+    def stream_with(self, errors):
+        calls = []
+
+        class Boom:
+            def __enter__(self_inner):
+                err = errors.pop(0)
+                calls.append(err)
+                if err is None:
+                    raise AssertionError("unexpected success path")
+                raise err
+
+            def __exit__(self_inner, *exc):
+                return False
+
+        client = mock.Mock()
+        client.stream.side_effect = lambda *a, **kw: Boom()
+        with mock.patch.object(lw_http, "get_client", return_value=client):
+            gen = lw_http.stream_sse("https://example.invalid/v1", {}, {},
+                                     max_attempts=2, sleep=lambda _: None)
+            with self.assertRaises(lw_http.APIError) as ctx:
+                list(gen)
+        return calls, ctx.exception
+
+    def test_read_error_is_retried_then_reported(self):
+        calls, err = self.stream_with([httpx.ReadError("reset"),
+                                       httpx.ReadError("reset")])
+        self.assertEqual(len(calls), 2)
+        self.assertIn("ReadError", str(err))
+
+    def test_a_permanent_error_is_not_retried(self):
+        calls, err = self.stream_with([httpx.UnsupportedProtocol("ftp?")])
+        self.assertEqual(len(calls), 1)
+        self.assertIn("UnsupportedProtocol", str(err))
 
 
 if __name__ == "__main__":

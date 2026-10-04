@@ -78,6 +78,8 @@ class TestTokenSplit(unittest.TestCase):
             self.cache_write_tokens = write
             self.output_tokens = out
             self.content = [{"type": "text", "text": "done"}]
+            self.stop_reason = "end_turn"
+            self.bad_tool_input = set()
 
     def run_once(self, handler):
         a = Agent(make_config(price_input=1.0))

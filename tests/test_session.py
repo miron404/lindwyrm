@@ -277,5 +277,23 @@ class TestDescribeAge(unittest.TestCase):
         self.assertIn("d ago", session.describe_age(time.time() - 5 * 86400))
 
 
+
+class TestCreatedStamp(SessionTestCase):
+    def test_a_none_created_is_stamped(self):
+        """setdefault left created=None alone, so every session had none."""
+        session.save_session("s", {"messages": [], "created": None}, root=self.root)
+        data = session.load_session("s", root=self.root)
+        self.assertIsInstance(data["created"], float)
+
+    def test_an_existing_created_is_kept(self):
+        session.save_session("s", {"messages": [], "created": 123.0}, root=self.root)
+        self.assertEqual(session.load_session("s", root=self.root)["created"], 123.0)
+
+    def test_saved_session_ids(self):
+        session.save_session("a", {"messages": []}, root=self.root)
+        session.save_session("b", {"messages": []}, root=self.root)
+        self.assertEqual(session.saved_session_ids(root=self.root), {"a", "b"})
+
+
 if __name__ == "__main__":
     unittest.main()

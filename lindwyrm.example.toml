@@ -1,6 +1,9 @@
 # Example lindwyrm config.
 # Copy to ./.lindwyrm.toml (project-local) or ~/.config/lindwyrm/config.toml (user).
-# Project-local settings override user settings.
+# Project-local settings override user settings -- but a project file comes
+# with `git clone`, so unless the project is in trusted_projects (user config
+# only) it can't set base_url, presets, key_file, proxy, no_proxy, audit_log
+# or session_retention_days, and its [policy] can only tighten.
 #
 # The API key is NEVER read from this file inline. Set it via environment:
 #     export DEEPSEEK_API_KEY=sk-...
@@ -9,6 +12,9 @@
 
 # key_file = "~/.secrets/deepseek.key"     # fallback API key file (used by any
                                             # preset with no matching env var set)
+
+# Projects whose ./.lindwyrm.toml is applied in full. User config only.
+# trusted_projects = ["~/work"]
 
 # Which preset to start on. Built in: "flash" / "pro" (both DeepSeek, via
 # DeepSeek's Anthropic-compatible endpoint). Set this to a name from
@@ -231,6 +237,7 @@ thinking_display = "peek"  # how to show reasoning: "peek" | "show" | "hide"
 #   confirm = ask every time (you see the path/preview first)
 #   deny    = never (also accepts "forbid" as a synonym)
 read   = "allow"           # reading/listing/searching
+# read_outside = "confirm" # floor for reads OUTSIDE the project (~/.ssh, keys...)
 write  = "confirm"         # creating/overwriting/editing files
 delete = "confirm"         # deleting files
 
@@ -240,10 +247,13 @@ bash   = "confirm"
 
 # read_only = true         # hard switch: forces write & delete to deny everywhere
 
-# Commands matching these prefixes are auto-allowed even when bash = "confirm".
+# Auto-allowed even when bash = "confirm": the command itself plus plain
+# arguments. Anything with ; & | < > $ ` ( ) in it is asked about anyway.
 bash_allowlist = ["git status", "git diff", "git log", "ls", "cat", "pytest"]
 
-# Commands containing any of these are ALWAYS blocked (added to safe defaults).
+# Commands containing any of these words are ALWAYS blocked (added to safe
+# defaults). Quotes and backslashes are ignored when matching. A backstop, not
+# a jail: a determined command can still spell around it.
 bash_denylist = ["sudo", "curl", "wget"]
 
 # ---------------------------------------------------------------------------

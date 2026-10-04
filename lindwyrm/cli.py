@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 from .agent import Agent
@@ -61,6 +62,7 @@ from .session import (
     load_session,
     new_session_id,
     save_session,
+    saved_session_ids,
     sweep_sessions,
 )
 
@@ -86,6 +88,13 @@ RED = "\033[31m"
 YELLOW = "\033[33m"
 RESET = "\033[0m"
 
+# Exit statuses for one-shot mode (-p). A script can't read "API error" off
+# the screen; it used to get 0 for that, and for half-finished work too.
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_INCOMPLETE = 3    # step ceiling, or the reply was cut off by max_tokens
+EXIT_INTERRUPTED = 130  # the shell convention for SIGINT
+
 # How many lines of bash command output to echo to the terminal. The model
 # always receives the full output; this only limits what you see.
 BASH_OUTPUT_LINES = 25
@@ -97,7 +106,8 @@ def _banner(cfg: Config, agent=None) -> None:
     print(f"  thinking: {'on' if cfg.thinking else 'off'}")
     print(f"  root:     {cfg.project_root}")
     p = cfg.policy
-    print(f"  perms:    read={p.read} write={p.write} delete={p.delete} bash={p.bash}")
+    print(f"  perms:    read={p.read} write={p.write} delete={p.delete} bash={p.bash}"
+          f" {DIM}(read outside project: {p.read_outside}){RESET}")
     if p.rules:
         print(f"  {DIM}{len(p.rules)} path rule(s) — see /policy{RESET}")
     if cfg.proxy:
@@ -115,6 +125,8 @@ def _print_policy(cfg: Config) -> None:
     p = cfg.policy
     print(f"{BOLD}Permissions{RESET}")
     print(f"  defaults: read={p.read} write={p.write} delete={p.delete}")
+    print(f"  outside the project: read is at least {p.read_outside}; "
+          f"\"always\" never covers it")
     print(f"  bash:     {p.bash}  (not path-scoped)")
     print(f"  read-only mode: {p.read_only}")
     if p.bash_allowlist:
@@ -391,10 +403,13 @@ PROMPT = _make_prompt()
 def _make_agent(cfg: Config, args) -> Agent:
     """Build the agent, resuming a saved session when asked."""
     agent = Agent(cfg)
+    if cfg.save_sessions:
+        sweep_sessions(cfg.session_retention_days)
+    # After the session sweep, so a retired session's results go with it.
+    offload.sweep_old_sessions(keep=saved_session_ids())
     if not cfg.save_sessions:
         return agent
 
-    sweep_sessions(cfg.session_retention_days)
     wanted = args.resume if getattr(args, "resume", None) else None
     if wanted is None and getattr(args, "continue_", False):
         wanted = latest_session_id(cfg.project_root)
@@ -422,6 +437,7 @@ def _make_agent(cfg: Config, args) -> Agent:
             return agent
 
     agent.session_id = new_session_id()
+    agent.session_created = time.time()
     offload.set_store(offload.OffloadStore(session_id=agent.session_id))
     return agent
 
@@ -476,13 +492,15 @@ def _persist(cfg: Config, agent: Agent) -> None:
     save_session(agent.session_id, state)
 
 
-def _do_turn(cfg: Config, agent: Agent, renderer: Renderer) -> None:
+def _do_turn(cfg: Config, agent: Agent, renderer: Renderer) -> int:
+    """Run one turn; returns an EXIT_* status for one-shot mode."""
     reset_session_grants()  # re-confirm "always" grants each user turn
     renderer.thinking_mode = cfg.thinking_display  # pick up /think changes
     renderer.enabled = cfg.markdown and _HAS_RICH
     renderer.begin_turn()
     on_tool_result = make_tool_result_printer(renderer)
     cost_before = agent.session_cost()
+    status = EXIT_OK
     try:
         _emit(f"[dim]{cfg.model}[/dim]" if _console else cfg.model)
         finished = agent.run_turn(
@@ -503,22 +521,36 @@ def _do_turn(cfg: Config, agent: Agent, renderer: Renderer) -> None:
                   f"-- the work isn't finished){RESET}\n"
                   f"  {DIM}say \"continue\" to pick up where it left off, or "
                   f"raise max_tool_steps in your config{RESET}\n")
+            status = EXIT_INCOMPLETE
+        elif agent.cut_off:
+            print(f"\n{YELLOW}(the reply was cut off at max_tokens = "
+                  f"{cfg.max_tokens:,} -- it is incomplete){RESET}\n"
+                  f"  {DIM}say \"continue\", or raise max_tokens in your "
+                  f"config{RESET}\n")
+            status = EXIT_INCOMPLETE
         _turn_summary(cfg, agent, cost_before)
-        _persist(cfg, agent)
     except UserQuit:
         # The user chose [q]uit at a confirmation prompt: stop the turn, but
         # stay in the REPL rather than tearing the session down.
         renderer.end_turn()
         print(f"\n{YELLOW}(stopped at your request){RESET}\n")
+        status = EXIT_INTERRUPTED
     except KeyboardInterrupt:
         renderer.end_turn()
         print(f"\n{YELLOW}(interrupted){RESET}\n")
+        status = EXIT_INTERRUPTED
     except APIError as e:
         renderer.end_turn()
         print(f"\n{RED}API error:{RESET} {e}\n")
+        status = EXIT_ERROR
     except Exception as e:  # noqa: BLE001
         renderer.end_turn()
         print(f"\n{RED}error:{RESET} {type(e).__name__}: {e}\n")
+        status = EXIT_ERROR
+    # Saved on every path: the history stays valid through an interrupt or
+    # an API error, and the tool results gathered before it are real work.
+    _persist(cfg, agent)
+    return status
 
 
 def _handle_command(line: str, cfg: Config, agent: Agent, renderer: Renderer) -> bool:
@@ -595,7 +627,7 @@ def _handle_command(line: str, cfg: Config, agent: Agent, renderer: Renderer) ->
         # overwritten by the empty one that follows.
         if cfg.save_sessions:
             agent.session_id = new_session_id()
-            agent.session_created = None
+            agent.session_created = time.time()
         print("history cleared (new session started)")
     else:
         print(f"unknown command: {cmd} (try /help)")
@@ -765,13 +797,14 @@ def main(argv: list[str] | None = None) -> int:
             agent = _make_agent(cfg, args)
             agent.add_user(args.prompt)
             renderer = Renderer(thinking_mode=cfg.thinking_display, enabled=cfg.markdown)
-            _do_turn(cfg, agent, renderer)
-            return 0
+            return _do_turn(cfg, agent, renderer)
 
         run_repl(cfg, args)
         return 0
     finally:
         close_client()  # release the pooled connection
+        if not cfg.save_sessions:
+            offload.discard_store()
 
 
 if __name__ == "__main__":

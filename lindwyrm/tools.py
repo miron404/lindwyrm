@@ -14,6 +14,7 @@ import base64
 import difflib
 import fnmatch
 import os
+import re
 import select
 import signal
 import subprocess
@@ -253,7 +254,9 @@ TOOL_SCHEMAS = [
         "description": (
             "Run a shell command in the project root and return its combined "
             "stdout/stderr. Requires bash permission. Has a timeout. Use for "
-            "running tests, git, build commands, etc."
+            "running tests, git, build commands, etc. stdin is closed, so "
+            "anything that prompts gets end-of-file: pass non-interactive "
+            "flags instead (-y, git commit -m, ...)."
         ),
         "input_schema": {
             "type": "object",
@@ -323,7 +326,15 @@ def tool_read_file(cfg: Config, path: str, start_line: int | None = None, end_li
             f"end_line {end_line}."
         )
     width = len(str(e))
-    return "\n".join(f"{str(i + 1).rjust(width)}\t{lines[i]}" for i in range(s, e))
+    out = "\n".join(f"{str(i + 1).rjust(width)}\t{lines[i]}" for i in range(s, e))
+    if len(out) > MAX_READ_BYTES:
+        # The size check above only fires without a range, so start_line=1
+        # used to hand back a file of any size in one piece.
+        raise SandboxError(
+            f"Lines {s + 1}-{e} of {_rel(cfg, target)} come to {len(out)} "
+            f"characters (> {MAX_READ_BYTES}). Read a smaller range."
+        )
+    return out
 
 
 def tool_write_file(cfg: Config, path: str, content: str) -> str:
@@ -361,12 +372,25 @@ def _match_lines(text: str, needle: str) -> list[int]:
     return lines
 
 
+def _to_crlf(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\n", "\r\n")
+
+
 def tool_edit_file(cfg: Config, path: str, old_text: str, new_text: str,
                    replace_all: bool = False) -> str:
     resolved = resolve_target(cfg, path)
     if not resolved.is_file():
         raise SandboxError(f"Not a file: {resolved}")
-    original = resolved.read_text(encoding="utf-8")
+    # Searching IS reading: "not found", "appears 3 times (line 4, ...)" and
+    # a declined write each tell the model something about the file. Without
+    # this, a read-denied .env could be probed one guess at a time.
+    authorize(cfg, "read", path, f"read {_rel(cfg, resolved)} (to edit it)")
+    # Bytes, not text mode: universal newlines turned every \r\n into \n, so
+    # a one-word edit rewrote the line endings of the entire file.
+    original = resolved.read_bytes().decode("utf-8")
+    if "\r\n" in original and original.count("\r\n") == original.count("\n"):
+        # read_file shows lines without their \r, so the model writes \n.
+        old_text, new_text = _to_crlf(old_text), _to_crlf(new_text)
     count = original.count(old_text)
     if count == 0:
         raise SandboxError("old_text not found in file.")
@@ -390,7 +414,7 @@ def tool_edit_file(cfg: Config, path: str, old_text: str, new_text: str,
 
     diff_preview = _unified_diff(original, updated, _rel(cfg, resolved))
     target = authorize(cfg, "write", path, summary, preview=diff_preview)
-    target.write_text(updated, encoding="utf-8")
+    target.write_bytes(updated.encode("utf-8"))
     return (f"Edited {_rel(cfg, target)}"
             + (f" ({count} occurrences replaced)" if replace_all else ""))
 
@@ -410,7 +434,7 @@ def _unified_diff(old: str, new: str, label: str) -> str:
     if not diff:
         return "(no textual change)"
 
-    body = [line.rstrip("\n") for line in diff[2:]]  # drop the ---/+++ header
+    body = [line.rstrip("\r\n") for line in diff[2:]]  # drop the ---/+++ header
     added = sum(1 for line in body if line.startswith("+"))
     removed = sum(1 for line in body if line.startswith("-"))
     if len(body) > MAX_DIFF_LINES:
@@ -589,18 +613,59 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
             continue
 
 
+# Characters that chain, substitute or redirect. An allowlisted prefix says
+# nothing about what comes after one of these: "ls && rm -rf ~" starts with
+# "ls" too.
+_SHELL_META = frozenset(";&|<>`$()\n\r")
+
+
+def bash_allowlisted(cmd: str, allowlist) -> bool:
+    """True if `cmd` is exactly an allowlisted command, plus plain arguments."""
+    if any(ch in _SHELL_META for ch in cmd):
+        return False
+    for entry in allowlist:
+        entry = entry.strip()
+        # A word boundary: "cat" allows "cat x", not "catapult".
+        if entry and (cmd == entry or cmd.startswith(entry + " ")):
+            return True
+    return False
+
+
+def bash_denylist_hit(cmd: str, denylist) -> str | None:
+    """The denylist entry `cmd` matches, if any.
+
+    Still a backstop and not a jail -- $(printf cu)rl gets past any list --
+    but the cheap disguises are closed: quotes and backslashes are dropped
+    before matching, because c''url and c\\url both run curl. Entries match
+    as whole words, so "sudo" no longer blocks "pseudocode".
+    """
+    flat = " ".join(re.sub(r"[\"'\\]", "", cmd).split())
+    for bad in denylist:
+        norm = " ".join(str(bad).split())
+        if not norm:
+            continue
+        pattern = re.escape(norm)
+        if norm[0].isalnum():
+            pattern = r"(?<![\w.-])" + pattern
+        if norm[-1].isalnum():
+            pattern += r"(?![\w-])"
+        if re.search(pattern, flat):
+            return bad
+    return None
+
+
 def tool_bash(cfg: Config, command: str, timeout: int = 60,
               on_output=None) -> str:
     if cfg.policy.read_only:
         raise SandboxError("Bash blocked: running in read-only mode.")
     cmd = command.strip()
     # Hard denylist always applies.
-    for bad in cfg.policy.bash_denylist:
-        if bad in cmd:
-            raise SandboxError(f"Bash blocked: command matches denylist entry {bad!r}.")
+    bad = bash_denylist_hit(cmd, cfg.policy.bash_denylist)
+    if bad is not None:
+        raise SandboxError(f"Bash blocked: command matches denylist entry {bad!r}.")
     # Allowlist shortcut.
     perm = cfg.policy.bash
-    if any(cmd.startswith(a) for a in cfg.policy.bash_allowlist):
+    if bash_allowlisted(cmd, cfg.policy.bash_allowlist):
         perm = "allow"
     if not bash_confirm(perm, f"run: {cmd}"):
         raise SandboxError("Bash declined by user.")
@@ -612,10 +677,16 @@ def tool_bash(cfg: Config, command: str, timeout: int = 60,
     # stderr is merged into stdout rather than read separately: reading two
     # pipes and concatenating them afterwards put every error AFTER all the
     # normal output, so a failure early in a build appeared at the very end.
+    #
+    # stdin is closed. Inherited, it was the terminal: anything that prompted
+    # (git commit with no -m, npm init, a password) sat waiting for input
+    # nobody was asked for until the timeout killed it.
     proc = subprocess.Popen(
         cmd,
         shell=True,
         cwd=str(cfg.project_root),
+        stdin=subprocess.DEVNULL,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         start_new_session=True,

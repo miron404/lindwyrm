@@ -57,6 +57,30 @@ def reset_session_grants() -> None:
     _session_grants.clear()
 
 
+def visible(text: str) -> str:
+    """`text` with every non-printing character shown as an escape.
+
+    What a confirmation prompt shows is model-chosen text, and a terminal
+    obeys the control sequences in it: a command ending in
+    "\\r\\033[2K... run: git status" wipes its own line and displays as a
+    harmless git status while something else runs. Bidi overrides and
+    zero-width characters can disguise text the same way. Tabs are kept --
+    they only move the cursor forward.
+    """
+    return "".join(
+        ch if ch.isprintable() or ch == "\t" else ascii(ch)[1:-1]
+        for ch in text
+    )
+
+
+def _print_request(op: str, summary: str) -> None:
+    """The request header, one escaped row per line of `summary`."""
+    first, *rest = summary.split("\n")
+    print(f"  \033[1;33m{op.upper()} requested:\033[0m {visible(first)}")
+    for line in rest:
+        print(f"    {visible(line)}")
+
+
 def _colorize_preview(line: str) -> str:
     """Tint a diff line so the change is visible at a glance.
 
@@ -101,19 +125,24 @@ def authorize(
     if level == "allow":
         return target
 
-    # confirm
-    if op in _session_grants:
+    # confirm. An "always" grant covers the project only: one keystroke
+    # meant for src/ shouldn't also open ~/.bashrc for the rest of the turn.
+    inside = cfg.policy.inside_root(target)
+    if op in _session_grants and inside:
         return target
 
     print()
-    print(f"  \033[1;33m{op.upper()} requested:\033[0m {summary}")
+    _print_request(op, summary)
     if preview:
-        for line in preview.splitlines():
-            print(f"    {_colorize_preview(line)}\033[0m")
-    ans = _ask(f"  Allow? [y]es / [n]o / [a]lways ({op}) / [q]uit: ")
+        for line in preview.split("\n"):
+            print(f"    {_colorize_preview(visible(line))}\033[0m")
+    if inside:
+        ans = _ask(f"  Allow? [y]es / [n]o / [a]lways ({op}) / [q]uit: ")
+    else:
+        ans = _ask("  Outside the project. Allow? [y]es / [n]o / [q]uit: ")
     if ans in ("y", "yes"):
         return target
-    if ans in ("a", "always"):
+    if ans in ("a", "always") and inside:
         _session_grants.add(op)
         return target
     if ans in ("q", "quit"):
@@ -124,14 +153,14 @@ def authorize(
 def bash_confirm(permission: str, summary: str) -> bool:
     """Confirm a bash command (path-independent). Returns True to proceed."""
     if permission == "deny":
-        print(f"  [denied by policy] {summary}")
+        print(f"  [denied by policy] {visible(summary)}")
         return False
     if permission == "allow":
         return True
     if "bash" in _session_grants:
         return True
     print()
-    print(f"  \033[1;33mBASH requested:\033[0m {summary}")
+    _print_request("bash", summary)
     ans = _ask("  Allow? [y]es / [n]o / [a]lways (bash) / [q]uit: ")
     if ans in ("y", "yes"):
         return True

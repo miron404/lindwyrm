@@ -5,6 +5,7 @@ for explicitly. A stray ALL_PROXY must never reroute API traffic on its own,
 and an explicit "direct" must really be direct.
 """
 
+import importlib.util
 import os
 import unittest
 from unittest import mock
@@ -20,10 +21,20 @@ from lindwyrm.config import (
 )
 
 
+# socksio is an optional extra, not a test dependency: the SOCKS paths are
+# exercised when it is installed (CI installs it) and skipped otherwise.
+HAS_SOCKSIO = importlib.util.find_spec("socksio") is not None
+needs_socksio = unittest.skipUnless(HAS_SOCKSIO, "socksio not installed")
+
+
 class TestParseProxy(unittest.TestCase):
     def test_urls_pass_through(self):
-        for url in ("http://h:8080", "https://h:8080",
-                    "socks5://h:1080", "socks5h://h:1080"):
+        for url in ("http://h:8080", "https://h:8080"):
+            self.assertEqual(parse_proxy(url, "x"), url)
+
+    @needs_socksio
+    def test_socks_urls_pass_through(self):
+        for url in ("socks5://h:1080", "socks5h://h:1080"):
             self.assertEqual(parse_proxy(url, "x"), url)
 
     def test_direct_spellings(self):
@@ -142,11 +153,23 @@ class TestClientPool(unittest.TestCase):
             client = lw_http.get_client(PROXY_DIRECT)
             self.assertEqual(len(client._mounts), 0)
 
+    @needs_socksio
     def test_system_client_honors_environment_proxies(self):
         with mock.patch.dict(os.environ, {"ALL_PROXY": "socks5://127.0.0.1:9"}):
             lw_http.close_client()
             client = lw_http.get_client(PROXY_SYSTEM)
             self.assertGreater(len(client._mounts), 0)
+
+
+    @unittest.skipIf(HAS_SOCKSIO, "needs socksio to be absent")
+    def test_system_socks_proxy_without_socksio_is_an_api_error(self):
+        """parse_proxy never sees a proxy that comes from ALL_PROXY, so the
+        missing extra surfaced as a bare ImportError in the middle of a turn."""
+        with mock.patch.dict(os.environ, {"ALL_PROXY": "socks5://127.0.0.1:9"}):
+            lw_http.close_client()
+            with self.assertRaises(lw_http.APIError) as ctx:
+                lw_http.get_client(PROXY_SYSTEM)
+        self.assertIn("lindwyrm[socks]", str(ctx.exception))
 
 
 class TestLoopbackBypass(unittest.TestCase):

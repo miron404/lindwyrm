@@ -15,7 +15,11 @@ read_file for whatever the file looks like now.
 Layout: one directory per session under the user's data dir, one plain text
 file per offloaded result, so the content stays greppable from outside. Stale
 session directories are swept on startup -- a crash shouldn't leak disk space
-forever.
+forever -- except those whose session file still exists, which a --resume
+needs intact. They go when the session itself is retired.
+
+These files hold the same thing a session file does -- source, command
+output, whatever was read -- so they get the same 0600-in-0700 treatment.
 """
 
 from __future__ import annotations
@@ -64,7 +68,9 @@ class OffloadStore:
 
     def _ensure_root(self) -> None:
         if not self._ready:
-            self.root.mkdir(parents=True, exist_ok=True)
+            self.root.parent.mkdir(parents=True, exist_ok=True)
+            self.root.mkdir(mode=0o700, exist_ok=True)
+            os.chmod(self.root, 0o700)  # mkdir's mode is filtered by umask
             self._ready = True
 
     def put(self, text: str, label: str) -> OffloadEntry | None:
@@ -78,7 +84,9 @@ class OffloadStore:
             self._counter += 1
             ref = f"off_{self._counter:04d}"
             path = self.root / f"{ref}.txt"
-            path.write_text(text, encoding="utf-8")
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
         except OSError:
             return None
         entry = OffloadEntry(ref=ref, path=path, label=label,
@@ -181,8 +189,9 @@ _store: OffloadStore | None = None
 def get_store(session_id: str | None = None) -> OffloadStore:
     global _store
     if _store is None:
+        # No sweep here: this has no idea which directories saved sessions
+        # still need. The CLI sweeps at startup, when it does know.
         _store = OffloadStore(session_id=session_id)
-        sweep_old_sessions()
     return _store
 
 
@@ -192,9 +201,25 @@ def set_store(store: OffloadStore | None) -> None:
     _store = store
 
 
+def discard_store() -> None:
+    """Delete the current store's files. For a session that isn't saved:
+    nothing can resume it, so nothing will ever read them again."""
+    global _store
+    if _store is not None:
+        _store.cleanup()
+        _store = None
+
+
 def sweep_old_sessions(root: Path | None = None,
-                       max_age_days: int = SESSION_RETENTION_DAYS) -> int:
-    """Delete offload directories left behind by crashed sessions."""
+                       max_age_days: int = SESSION_RETENTION_DAYS,
+                       keep: set[str] | frozenset[str] = frozenset()) -> int:
+    """Delete offload directories left behind by crashed sessions.
+
+    `keep` names directories still in use by a saved session. A directory's
+    mtime only moves when a result is offloaded, so age alone would sweep a
+    session that is resumed often but rarely offloads -- and its stubs would
+    point at nothing.
+    """
     root = root or DEFAULT_ROOT
     if not root.is_dir():
         return 0
@@ -202,7 +227,7 @@ def sweep_old_sessions(root: Path | None = None,
     removed = 0
     try:
         for child in root.iterdir():
-            if not child.is_dir():
+            if not child.is_dir() or child.name in keep:
                 continue
             try:
                 if child.stat().st_mtime < cutoff:

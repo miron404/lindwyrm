@@ -96,6 +96,14 @@ Each of these has already cost someone an afternoon:
   after the session is made, so sorting the listing by id (or by filename)
   ranks an abandoned session above the one in daily use, and `--continue`
   resumes the wrong conversation. Order by `_last_saved()`.
+- **Every `tool_use` must be answered, even when the turn is stopped.** A
+  `[q]uit` or Ctrl+C mid-batch used to leave a `tool_use` with no
+  `tool_result`, and every later request was a 400. `run_turn` fills in an
+  "interrupted" result for each unanswered call before re-raising.
+- **A project's `.lindwyrm.toml` is untrusted.** It comes with `git clone`.
+  Unless the project is in the user's `trusted_projects`, keys in
+  `USER_ONLY_KEYS` are dropped and `[policy]` may only tighten. A new setting
+  that can send data somewhere or loosen a confirmation belongs in that set.
 - **History may only be cut at a user-turn boundary.** Cutting elsewhere
   orphans a `tool_result` from its `tool_use` and both APIs reject it. See
   `is_turn_boundary`.

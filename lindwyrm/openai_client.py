@@ -188,6 +188,7 @@ class OpenAIStreamHandler:
         self.cache_read_tokens: int = 0
         # OpenAI's shape has no cache-write concept; left at 0.
         self.cache_write_tokens: int = 0
+        self.bad_tool_input: set[str] = set()  # see client.StreamHandler
         self._text = ""
         self._tool_calls: dict[int, dict] = {}  # index -> {id, name, args}
 
@@ -243,13 +244,15 @@ class OpenAIStreamHandler:
             self.content.append({"type": "text", "text": self._text})
         for idx in sorted(self._tool_calls):
             tc = self._tool_calls[idx]
+            tool_id = tc["id"] or f"call_{idx}"
             try:
                 args = json.loads(tc["args"]) if tc["args"] else {}
             except json.JSONDecodeError:
                 args = {}
+                self.bad_tool_input.add(tool_id)
             self.content.append({
                 "type": "tool_use",
-                "id": tc["id"] or f"call_{idx}",
+                "id": tool_id,
                 "name": tc["name"] or "",
                 "input": args,
             })
@@ -275,7 +278,7 @@ def stream_message(
 
     for _event, data in stream_sse(url, _headers(cfg), body,
                                    proxy=cfg.proxy,
-                                       no_proxy=cfg.no_proxy,
+                                   no_proxy=cfg.no_proxy,
                                    max_attempts=cfg.max_retries,
                                    on_retry=on_retry):
         if "error" in data:

@@ -75,6 +75,27 @@ SUMMARY_PREFIX = (
 # the result itself.
 OFFLOADABLE_TOOLS = frozenset({"read_file", "bash", "grep", "glob", "list_dir"})
 
+# The result recorded for a tool call the user stopped before it finished.
+# Every tool_use needs a tool_result in the very next message, or both APIs
+# reject the whole history -- an interrupted batch used to leave the session
+# answering every later message with a 400.
+INTERRUPTED_RESULT = (
+    "Not completed: the user stopped the turn before this tool call "
+    "finished, so it may not have run, or may have run only partly."
+)
+
+CUT_OFF_RESULT = (
+    "Not run: your reply hit the max_tokens limit ({max_tokens}) while this "
+    "tool call was being written, so its arguments were cut off. Repeating "
+    "the same call will be cut off again. Make it smaller instead -- for a "
+    "big file, write the first part with write_file and add the rest with "
+    "edit_file -- or ask the user to raise max_tokens."
+)
+
+BAD_INPUT_RESULT = (
+    "Not run: the arguments of this tool call were not valid JSON."
+)
+
 # Tools that only make sense on a model that can see. Offering view_image to
 # one that can't just buys a wasted turn and a confused apology.
 VISION_TOOLS = frozenset({"view_image"})
@@ -223,6 +244,8 @@ class Agent:
         # Set by the CLI; None means this conversation isn't being saved.
         self.session_id: str | None = None
         self.session_created: float | None = None
+        # True when the last turn's final reply was cut short by max_tokens.
+        self.cut_off: bool = False
 
     def add_user(self, text: str) -> None:
         self.messages.append({"role": "user", "content": [{"type": "text", "text": text}]})
@@ -233,7 +256,11 @@ class Agent:
         """Best available measure of how much context the history occupies."""
         if self.last_input_tokens > 0:
             return self.last_input_tokens
-        return estimate_tokens(self.messages, self.system_prompt)
+        # The tool schemas are part of every request too; leaving them out
+        # put the estimate thousands of tokens under the next measurement.
+        tools = json.dumps(tools_for(self.cfg), ensure_ascii=False)
+        return (estimate_tokens(self.messages, self.system_prompt)
+                + estimate_text_tokens(tools))
 
     def context_fraction(self) -> float:
         limit = max(1, self.cfg.context_limit)
@@ -394,7 +421,10 @@ class Agent:
                 count += 1
 
         if count:
-            self.last_input_tokens = estimate_tokens(self.messages, self.system_prompt)
+            # The measured size no longer describes this history. Zero makes
+            # context_tokens() estimate instead -- and /context say so,
+            # rather than presenting a guess as a measurement.
+            self.last_input_tokens = 0
         return count, freed
 
     # -- compaction ---------------------------------------------------------
@@ -452,14 +482,72 @@ class Agent:
                           "Understood -- continuing from that context."}]},
         ] + recent
 
-        # The old count describes history that no longer exists; re-estimate so
-        # the next should_compact() isn't answered with a stale number.
-        self.last_input_tokens = estimate_tokens(self.messages, self.system_prompt)
-        after = self.last_input_tokens
+        # The old count describes history that no longer exists; drop it so
+        # the next should_compact() is answered with an estimate of what is
+        # actually there, not a stale measurement.
+        self.last_input_tokens = 0
+        after = self.context_tokens()
         saved = max(0, before - after)
         return True, f"compacted {cut} message(s), ~{saved} tokens freed"
 
     # -- main loop ----------------------------------------------------------
+
+    def _run_tool_use(self, tu: dict, *, cut: bool, bad_input: bool,
+                      on_tool=None, on_tool_result=None,
+                      on_tool_output=None) -> dict:
+        """Run one tool call and return its tool_result block."""
+        name = tu["name"]
+        tool_input = tu.get("input", {})
+        if on_tool:
+            on_tool(name, tool_input)
+        self._tool_labels[tu["id"]] = self.tool_label(name, tool_input)
+        if cut or bad_input:
+            # Running it would only produce "missing argument" errors, which
+            # the model reads as its own mistake and repeats -- seen live,
+            # three identical empty write_file calls in a row.
+            result = (CUT_OFF_RESULT.format(max_tokens=self.cfg.max_tokens)
+                      if cut else BAD_INPUT_RESULT)
+            is_error = True
+        else:
+            result, is_error = run_tool(self.cfg, name, tool_input,
+                                        on_output=on_tool_output)
+        # A single monstrous result (a 200 KB file, a full test log)
+        # can fill the window on its own, so it goes to disk at once
+        # rather than waiting for the pressure trigger.
+        if isinstance(result, ImageResult):
+            # A picture can't be summarized into the transcript, so it
+            # travels as its own content block. Never offloaded: the
+            # provider caps it near IMAGE_TOKENS however large the file.
+            content = [
+                {"type": "image", "source": {
+                    "type": "base64",
+                    "media_type": result.media_type,
+                    "data": result.data}},
+                {"type": "text", "text": result.note},
+            ]
+            shown = result.note
+        else:
+            if (self.cfg.offload and not is_error
+                    and name in OFFLOADABLE_TOOLS
+                    and estimate_text_tokens(result) >= eager_offload_tokens(self.cfg)):
+                result = self._offload_result_labelled(
+                    self._tool_labels[tu["id"]], result)
+            content = result
+            shown = result
+        _audit(self.cfg, {
+            "tool": name,
+            "input": tool_input,
+            "error": is_error,
+            "result_preview": shown[:200],
+        })
+        if on_tool_result:
+            on_tool_result(name, shown, is_error)
+        return {
+            "type": "tool_result",
+            "tool_use_id": tu["id"],
+            "content": content,
+            "is_error": is_error,
+        }
 
     def run_turn(
         self,
@@ -478,9 +566,12 @@ class Agent:
         Returns True if the model finished, False if it ran into the step
         ceiling with work still in progress -- callers are expected to check,
         because that case is otherwise indistinguishable from a finished turn
-        and leaves the user staring at an answer that just stops.
+        and leaves the user staring at an answer that just stops. For the
+        same reason `self.cut_off` is set when the final reply was truncated
+        by max_tokens.
         """
         max_steps = max_steps or self.cfg.max_tool_steps
+        self.cut_off = False
         for _ in range(max_steps):
             if self.should_compact():
                 # Offloading first: it is cheap, reversible, and often enough
@@ -513,59 +604,54 @@ class Agent:
             self.total_fresh_input_tokens += max(
                 0, handler.input_tokens - cache_read - cache_write)
 
+            truncated = handler.stop_reason == "max_tokens"
+            if not handler.content:
+                # Both APIs reject an empty assistant message in history, so
+                # storing one would fail every request after it.
+                self.cut_off = truncated
+                return True
+
             # Echo assistant content back verbatim (keeps thinking blocks).
             self.messages.append({"role": "assistant", "content": handler.content})
 
             tool_uses = [b for b in handler.content if b.get("type") == "tool_use"]
             if not tool_uses:
+                # The caller has to say so: a reply cut off by max_tokens
+                # otherwise reads as a finished answer that just stops.
+                self.cut_off = truncated
                 return True  # end_turn
 
-            tool_results = []
-            for tu in tool_uses:
-                name = tu["name"]
-                tool_input = tu.get("input", {})
-                if on_tool:
-                    on_tool(name, tool_input)
-                result, is_error = run_tool(self.cfg, name, tool_input,
-                                            on_output=on_tool_output)
-                self._tool_labels[tu["id"]] = self.tool_label(name, tool_input)
-                # A single monstrous result (a 200 KB file, a full test log)
-                # can fill the window on its own, so it goes to disk at once
-                # rather than waiting for the pressure trigger.
-                if isinstance(result, ImageResult):
-                    # A picture can't be summarized into the transcript, so it
-                    # travels as its own content block. Never offloaded: the
-                    # provider caps it near IMAGE_TOKENS however large the file.
-                    content = [
-                        {"type": "image", "source": {
-                            "type": "base64",
-                            "media_type": result.media_type,
-                            "data": result.data}},
-                        {"type": "text", "text": result.note},
-                    ]
-                    shown = result.note
-                else:
-                    if (self.cfg.offload and not is_error
-                            and name in OFFLOADABLE_TOOLS
-                            and estimate_text_tokens(result) >= eager_offload_tokens(self.cfg)):
-                        result = self._offload_result_labelled(
-                            self._tool_labels[tu["id"]], result)
-                    content = result
-                    shown = result
-                _audit(self.cfg, {
-                    "tool": name,
-                    "input": tool_input,
-                    "error": is_error,
-                    "result_preview": shown[:200],
-                })
-                if on_tool_result:
-                    on_tool_result(name, shown, is_error)
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tu["id"],
-                    "content": content,
-                    "is_error": is_error,
-                })
+            # When max_tokens strikes mid-call, the last call is the one it
+            # cut. Its arguments may even parse -- an empty {} does -- so the
+            # position decides, not the JSON.
+            cut_id = tool_uses[-1]["id"] if truncated else None
+            if cut_id and on_notice:
+                on_notice(f"the reply hit max_tokens ({self.cfg.max_tokens}) in "
+                          f"the middle of a tool call; it was not run")
+
+            tool_results: list[dict] = []
+            try:
+                for tu in tool_uses:
+                    tool_results.append(self._run_tool_use(
+                        tu, cut=tu["id"] == cut_id,
+                        bad_input=tu["id"] in handler.bad_tool_input,
+                        on_tool=on_tool, on_tool_result=on_tool_result,
+                        on_tool_output=on_tool_output))
+            except BaseException:
+                # [q]uit, Ctrl+C, or a crash part-way through the batch. The
+                # history must still pair every tool_use with a result, or
+                # the session is dead: every later request is a 400.
+                answered = {r["tool_use_id"] for r in tool_results}
+                for tu in tool_uses:
+                    if tu["id"] not in answered:
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tu["id"],
+                            "content": INTERRUPTED_RESULT,
+                            "is_error": True,
+                        })
+                self.messages.append({"role": "user", "content": tool_results})
+                raise
             self.messages.append({"role": "user", "content": tool_results})
 
         # Hit the ceiling. Nothing is written into the history: a line put

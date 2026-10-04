@@ -81,9 +81,23 @@ def collect_context_files(project_root: Path, *, explicit: str | None = None,
             found.append(path)
     else:
         project_file = find_context_file(project_root)
-        if project_file and project_file not in found:
+        if (project_file and project_file not in found
+                and _resolves_inside(project_file, project_root)):
             found.append(project_file)
     return found
+
+
+def _resolves_inside(path: Path, root: Path) -> bool:
+    """False for a project AGENTS.md that is a symlink out of the project.
+
+    git checks out symlinks as symlinks, so a cloned repo can ship an
+    AGENTS.md pointing at ~/.ssh/id_ed25519 -- and whatever it points at
+    would be read into the system prompt and sent to the provider.
+    """
+    try:
+        return path.resolve().is_relative_to(root.resolve())
+    except (OSError, RuntimeError):
+        return False
 
 
 def load_project_context(project_root: Path, *, explicit: str | None = None,

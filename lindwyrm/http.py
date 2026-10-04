@@ -38,6 +38,14 @@ DEFAULT_MAX_ATTEMPTS = 4
 DEFAULT_BACKOFF_BASE = 1.0  # seconds; doubled each attempt
 MAX_BACKOFF = 30.0
 
+# Failures that happen in transit and are worth another try: timeouts of
+# every kind, resets and refused connections, a server that hung up. Bad
+# URLs and unsupported schemes are deliberately not here -- they fail the
+# same way every time. httpx.ReadError (a reset mid-response) used to escape
+# both the retry and the APIError wrapper.
+RETRY_ERRORS = (httpx.TimeoutException, httpx.NetworkError,
+                httpx.RemoteProtocolError, httpx.ProxyError)
+
 # One client per distinct proxy setting. A proxy is baked into the client at
 # construction, so a single shared client can't serve presets with different
 # proxies -- but building one per request would throw away connection reuse,
@@ -71,7 +79,15 @@ def get_client(proxy: str = PROXY_DIRECT) -> httpx.Client:
     if proxy and proxy != PROXY_SYSTEM:
         kwargs["proxy"] = proxy
 
-    client = httpx.Client(**kwargs)
+    try:
+        client = httpx.Client(**kwargs)
+    except ImportError as e:
+        # "system" can name a SOCKS proxy through ALL_PROXY, which
+        # parse_proxy never got to see; httpx then needs socksio.
+        raise APIError(
+            f"{e} -- the proxy comes from your environment (proxy = "
+            f"\"system\"). Install SOCKS support with: "
+            f"pip install 'lindwyrm[socks]'") from None
     _clients[proxy] = client
     return client
 
@@ -160,8 +176,7 @@ def stream_sse(
                     yield event
                 return
 
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
-                httpx.RemoteProtocolError, httpx.ProxyError) as e:
+        except RETRY_ERRORS as e:
             if emitted or attempt >= max_attempts:
                 raise APIError(_redact(f"{type(e).__name__}: {e}", proxy)) from e
             last_error = type(e).__name__
@@ -169,6 +184,10 @@ def stream_sse(
             if on_retry:
                 on_retry(attempt, last_error, delay)
             sleep(delay)
+        except httpx.HTTPError as e:
+            # Not transient: retrying can't help, but it is still an API
+            # failure, reported like one rather than as a raw traceback.
+            raise APIError(_redact(f"{type(e).__name__}: {e}", proxy)) from e
 
     raise APIError(f"Giving up after {max_attempts} attempts ({last_error}).")
 

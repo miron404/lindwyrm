@@ -90,7 +90,10 @@ def save_session(session_id: str, state: dict, root: Path | None = None) -> Path
     state = dict(state)
     state["id"] = session_id
     state["updated"] = time.time()
-    state.setdefault("created", state["updated"])
+    # Not setdefault: callers pass created=None for a session they haven't
+    # stamped, and setdefault leaves an existing None alone forever.
+    if state.get("created") is None:
+        state["created"] = state["updated"]
     state["title"] = _title_from(state.get("messages", []))
 
     try:
@@ -157,6 +160,15 @@ def list_sessions(project_root: str | Path | None = None, *, limit: int = 20,
         if len(found) >= limit:
             break
     return found
+
+
+def saved_session_ids(root: Path | None = None) -> set[str]:
+    """Ids of every session on disk, whatever project it belongs to."""
+    directory = root or SESSIONS_ROOT
+    try:
+        return {path.stem for path in directory.glob("*.json")}
+    except OSError:
+        return set()
 
 
 def latest_session_id(project_root: str | Path, root: Path | None = None) -> str | None:
