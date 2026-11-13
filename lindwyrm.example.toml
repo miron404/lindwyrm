@@ -63,9 +63,11 @@ default_preset = "flash"
 #                             # dozens of turns -- so this sits where a cold
 #                             # turn starts to hurt, not lower. 0 disables.
 # compact_keep_last = 4      # floor on recent messages kept verbatim
-# compact_keep_tokens = 8000 # protected zone, in TOKENS -- four messages can be
+# compact_keep_tokens = 0    # protected zone, in TOKENS -- four messages can be
 #                            # forty tokens or half the window depending on
-#                            # whether a test run landed in them. Capped at a
+#                            # whether a test run landed in them. 0 is auto:
+#                            # an eighth of the point where compaction starts
+#                            # (25,000 for a 200K trigger). Capped at a
 #                            # quarter of context_limit so a small window still
 #                            # leaves something to compact.
 # context_limit = 128000     # your model's window; also settable per-preset.

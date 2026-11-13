@@ -481,7 +481,7 @@ class Policy:
 class Config:
     api_key: str
     base_url: str = DEFAULT_BASE_URL
-    model: str = "deepseek-v4-flash"
+    model: str = "deepseek-flash"
     format: str = "anthropic"  # "anthropic" | "openai" -- selects the wire client
     max_tokens: int = 8192
     thinking: bool = True
@@ -499,8 +499,6 @@ class Config:
     vision: bool = False
     temperature: float | None = None
     max_completion_tokens: bool = False
-    thinking_effort: str | None = None
-    vision: bool = False
     # Resolved proxy: "" = direct, "system" = use env vars, else a proxy URL.
     proxy: str = PROXY_DIRECT
     # Per-million-token prices for the active preset; None = don't show cost.
@@ -538,8 +536,9 @@ class Config:
     compact_keep_last: int = 4  # floor on messages kept verbatim
     # Protected zone, in tokens. A message count alone is a poor measure:
     # four messages can be forty tokens or half the window depending on
-    # whether a test run landed in them.
-    compact_keep_tokens: int = 8_000
+    # whether a test run landed in them. 0 means auto: an eighth of the
+    # point where compaction starts. See Agent.keep_tokens().
+    compact_keep_tokens: int = 0
 
     # Offloading: move bulky tool results to disk and leave a stub the model
     # can expand with read_offloaded. Reversible, unlike summarizing, so it
@@ -868,7 +867,7 @@ def load_config(
         compact_threshold=float(data.get("compact_threshold", 0.75)),
         compact_max_tokens=max(0, int(data.get("compact_max_tokens", 200_000))),
         compact_keep_last=max(0, int(data.get("compact_keep_last", 4))),
-        compact_keep_tokens=max(0, int(data.get("compact_keep_tokens", 8_000))),
+        compact_keep_tokens=max(0, int(data.get("compact_keep_tokens", 0))),
         offload=bool(data.get("offload", True)),
         offload_threshold_tokens=max(1, int(data.get("offload_threshold_tokens", 1_000))),
         offload_eager_tokens=max(0, int(data.get("offload_eager_tokens", 0))),

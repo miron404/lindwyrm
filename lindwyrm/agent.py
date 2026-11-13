@@ -70,6 +70,18 @@ SUMMARY_PREFIX = (
     "as established background:]\n\n"
 )
 
+# Follows the summary when history was cut in the middle of a turn. The
+# request that turn is answering sits in the part being summarized, and a
+# paraphrase of it is not good enough: the model would carry on working from
+# the summarizer's reading of what was asked. session.py looks for the same
+# words to title a session.
+REQUEST_MARKER = "\n\n[The request this work is answering, in the user's own words:]\n\n"
+
+SUMMARY_CUT_OFF_NOTE = (
+    "; the summary itself hit max_tokens and ends mid-sentence, so details "
+    "from the end of it may be missing"
+)
+
 # Tools whose output is bulk data worth moving to disk. The others return a
 # line or two ("Wrote 412 chars to ..."), where a stub would cost more than
 # the result itself.
@@ -95,6 +107,18 @@ CUT_OFF_RESULT = (
 BAD_INPUT_RESULT = (
     "Not run: the arguments of this tool call were not valid JSON."
 )
+
+# The protected zone when compact_keep_tokens is 0: an eighth of the point
+# where compaction starts, so 25K of a 200K trigger and 12K of a 96K one.
+# A fixed 8,000 was two or three tool steps -- after a summary the model had
+# lost the file it was in the middle of editing and read it again, paying for
+# the same tokens plus a round trip. Keeping more costs next to nothing: a
+# summary rewrites the head of the history anyway, so the tail is charged at
+# cache-miss rates once whatever its size. Not larger, because the same zone
+# is what microcompact may not offload from, and a wide one leaves the cheap,
+# reversible step less to reclaim before the lossy one has to run.
+KEEP_TRIGGER_SHARE = 8
+KEEP_FLOOR = 1_000
 
 # Tools that only make sense on a model that can see. Offering view_image to
 # one that can't just buys a wasted turn and a confused apology.
@@ -186,8 +210,9 @@ def protected_index(messages: list[dict], keep_tokens: int, keep_last: int) -> i
 def is_turn_boundary(msg: dict) -> bool:
     """True if `msg` starts a fresh user turn (not a batch of tool results).
 
-    History may only be cut at one of these. Cutting anywhere else can orphan
-    a tool_result from its tool_use -- or vice versa -- which the APIs reject.
+    The preferred place to cut history. The only other safe one is just
+    before an assistant message (see midturn_cut_at_or_before); anywhere
+    else orphans a tool_result from its tool_use, which the APIs reject.
     """
     if msg.get("role") != "user":
         return False
@@ -206,6 +231,30 @@ def boundary_at_or_before(messages: list[dict], index: int) -> int:
         if is_turn_boundary(messages[i]):
             return i
     return 0
+
+
+def midturn_cut_at_or_before(messages: list[dict], index: int) -> int:
+    """Latest assistant message at or before `index`, or 0 if there is none.
+
+    The one other place a cut is safe: everything before an assistant
+    message is whole request/result pairs, and everything from it on answers
+    only its own calls. Without this a single long turn -- one request,
+    sixty tool steps -- has no boundary but index 0 and could never be
+    compacted at all, however far past the window it grew.
+    """
+    start = min(max(0, index), len(messages) - 1)
+    # Not index 1: that would "summarize" nothing but the request itself.
+    for i in range(start, 1, -1):
+        if messages[i].get("role") == "assistant":
+            return i
+    return 0
+
+
+def _message_text(message: dict) -> str:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return str(content or "")
+    return "".join(b.get("text", "") for b in content if b.get("type") == "text")
 
 
 def find_cut_index(messages: list[dict], keep_last: int) -> int:
@@ -231,6 +280,11 @@ class Agent:
         # Input tokens the API reported for the most recent request; this is
         # what the next request will cost before anything new is added.
         self.last_input_tokens: int = 0
+        # How many messages that measurement covered. What has been appended
+        # since -- the reply, and tool results that can be large -- is
+        # estimated on top, or the compaction trigger runs a step behind and
+        # a batch of big results can sail past the window unnoticed.
+        self._measured_upto: int = 0
         self.total_output_tokens: int = 0
         self.total_cache_read_tokens: int = 0
         # Billed separately from cache reads: a cache write typically costs
@@ -255,7 +309,8 @@ class Agent:
     def context_tokens(self) -> int:
         """Best available measure of how much context the history occupies."""
         if self.last_input_tokens > 0:
-            return self.last_input_tokens
+            return self.last_input_tokens + estimate_tokens(
+                self.messages[self._measured_upto:])
         # The tool schemas are part of every request too; leaving them out
         # put the estimate thousands of tokens under the next measurement.
         tools = json.dumps(tools_for(self.cfg), ensure_ascii=False)
@@ -269,11 +324,15 @@ class Agent:
     def keep_tokens(self) -> int:
         """Size of the protected zone, capped against the context window.
 
-        A flat 8k zone is right for a 128k window and absurd for a 8k one --
-        it would protect the entire history and compaction would never fire.
+        compact_keep_tokens = 0 means a share of the compaction trigger (see
+        KEEP_TRIGGER_SHARE). Either way it is capped at a quarter of the
+        window: a zone sized for a 128k window would protect the entire
+        history of an 8k one, and compaction would never fire.
         """
         ceiling = max(1, int(self.cfg.context_limit * 0.25))
-        return min(self.cfg.compact_keep_tokens, ceiling)
+        wanted = self.cfg.compact_keep_tokens or max(
+            KEEP_FLOOR, self.compact_at() // KEEP_TRIGGER_SHARE)
+        return min(wanted, ceiling)
 
     def compact_at(self) -> int:
         """Context size at which reclaiming starts: a share of the window, or
@@ -329,6 +388,7 @@ class Agent:
         self.messages = state.get("messages") or []
         self._tool_labels = dict(state.get("tool_labels") or {})
         self.last_input_tokens = int(state.get("last_input_tokens") or 0)
+        self._measured_upto = len(self.messages)
         totals = state.get("totals") or {}
         self.total_output_tokens = int(totals.get("output", 0))
         self.total_cache_read_tokens = int(totals.get("cache_read", 0))
@@ -382,7 +442,9 @@ class Agent:
         entry = store.put(result, label)
         if entry is None:
             return result  # disk trouble: keep it inline rather than lose it
-        stub = store.stub(entry, result)
+        # A command's verdict is at the bottom: the failing test, the
+        # compiler's last error, the exit summary.
+        stub = store.stub(entry, result, tail=label.startswith("bash "))
         if len(stub) >= len(result):
             return result  # offloading must never make the context bigger
         return stub
@@ -435,12 +497,23 @@ class Agent:
         `focus` is passed through to the summarizer, so the user can say what
         matters ("keep the API decisions, drop the debugging").
 
-        Returns (did_compact, note). Cuts only at a user-turn boundary, so
-        tool_use/tool_result pairs are never split.
+        Returns (did_compact, note). Cuts at a user-turn boundary, or just
+        before an assistant message when the current turn is itself the
+        bulk, so tool_use/tool_result pairs are never split.
         """
         limit = protected_index(self.messages, self.keep_tokens(),
                                 self.cfg.compact_keep_last)
         cut = boundary_at_or_before(self.messages, limit)
+        # A turn boundary is the better cut -- the turn in progress stays
+        # whole -- but only while that turn is small. Once it is most of
+        # what triggers compaction, or the only turn there is, cutting at
+        # its start reclaims nothing, so the cut moves inside it.
+        mid = midturn_cut_at_or_before(self.messages, limit)
+        midturn = mid > cut and (
+            cut == 0
+            or estimate_tokens(self.messages[cut:]) > self.compact_at() // 2)
+        if midturn:
+            cut = mid
         if cut == 0:
             return False, "nothing old enough to compact yet"
 
@@ -456,15 +529,25 @@ class Agent:
         ask = "Summarize the conversation above as instructed."
         if focus:
             ask += f"\n\nThe user asked you to focus on: {focus}"
-        transcript = older + [{
-            "role": "user",
-            "content": [{"type": "text", "text": ask}],
-        }]
+        ask_block = {"type": "text", "text": ask}
+        last = older[-1]
+        if last.get("role") == "user" and isinstance(last.get("content"), list):
+            # A mid-turn cut ends on tool results. The question joins that
+            # message rather than following it: two user messages in a row
+            # is a shape not every provider accepts.
+            transcript = older[:-1] + [
+                {**last, "content": last["content"] + [ask_block]}]
+        else:
+            transcript = older + [{"role": "user", "content": [ask_block]}]
         try:
             handler = self._call_model(transcript, SUMMARY_SYSTEM, [],
                                        cfg=summary_cfg, on_retry=on_retry)
         except Exception as e:  # noqa: BLE001 -- compaction must never kill a session
             return False, f"compaction failed ({type(e).__name__}: {e})"
+
+        # Paid for whether or not the summary is usable, and usually the
+        # largest single request of the session.
+        self._count_usage(handler)
 
         summary = "".join(
             b.get("text", "") for b in handler.content if b.get("type") == "text"
@@ -472,15 +555,21 @@ class Agent:
         if not summary:
             return False, "compaction failed (model returned no summary)"
 
-        # A synthetic user/assistant pair keeps roles alternating, which the
-        # Anthropic wire format expects.
-        self.messages = [
-            {"role": "user",
-             "content": [{"type": "text", "text": SUMMARY_PREFIX + summary}]},
-            {"role": "assistant",
-             "content": [{"type": "text", "text":
-                          "Understood -- continuing from that context."}]},
-        ] + recent
+        head = {"role": "user", "content": [{"type": "text", "text":
+                SUMMARY_PREFIX + summary + (self._request_in(older) if midturn else "")}]}
+        if midturn:
+            # `recent` opens with the assistant's next step, so the summary
+            # alone keeps the roles alternating.
+            self.messages = [head] + recent
+        else:
+            # A synthetic user/assistant pair keeps roles alternating, which
+            # the Anthropic wire format expects.
+            self.messages = [
+                head,
+                {"role": "assistant",
+                 "content": [{"type": "text", "text":
+                              "Understood -- continuing from that context."}]},
+            ] + recent
 
         # The old count describes history that no longer exists; drop it so
         # the next should_compact() is answered with an estimate of what is
@@ -488,7 +577,39 @@ class Agent:
         self.last_input_tokens = 0
         after = self.context_tokens()
         saved = max(0, before - after)
-        return True, f"compacted {cut} message(s), ~{saved} tokens freed"
+        note = f"compacted {cut} message(s), ~{saved} tokens freed"
+        if handler.stop_reason == "max_tokens":
+            note += SUMMARY_CUT_OFF_NOTE
+        return True, note
+
+    def _request_in(self, older: list[dict]) -> str:
+        """The request of the turn `older` ends inside, marked for quoting
+        after the summary. Empty when it is too long to be worth carrying."""
+        opening = older[boundary_at_or_before(older, len(older) - 1)]
+        text = _message_text(opening)
+        if text.startswith(SUMMARY_PREFIX):
+            # This turn was already cut once; its request rode along behind
+            # that summary and has to ride along behind this one too.
+            _, found, text = text.partition(REQUEST_MARKER)
+            if not found:
+                return ""
+        text = text.strip()
+        # A pasted log for a request would undo the compaction it rides on;
+        # past an eighth of the budget the summary's account has to do.
+        if not text or estimate_text_tokens(text) > self.compact_at() // 8:
+            return ""
+        return REQUEST_MARKER + text
+
+    def _count_usage(self, handler) -> None:
+        self.total_output_tokens += handler.output_tokens
+        cache_read = handler.cache_read_tokens
+        cache_write = handler.cache_write_tokens
+        self.total_cache_read_tokens += cache_read
+        self.total_cache_write_tokens += cache_write
+        # input_tokens is the whole context; the cached parts are priced
+        # differently, so what's left is what was billed as fresh input.
+        self.total_fresh_input_tokens += max(
+            0, handler.input_tokens - cache_read - cache_write)
 
     # -- main loop ----------------------------------------------------------
 
@@ -559,6 +680,7 @@ class Agent:
         on_tool_output: Callable[[str], None] | None = None,
         on_retry: Callable[[int, str, float], None] | None = None,
         on_notice: Callable[[str], None] | None = None,
+        on_step: Callable[[], None] | None = None,
         max_steps: int | None = None,
     ) -> bool:
         """Run model<->tool cycles until the model is done (end_turn).
@@ -569,6 +691,10 @@ class Agent:
         and leaves the user staring at an answer that just stops. For the
         same reason `self.cut_off` is set when the final reply was truncated
         by max_tokens.
+
+        `on_step` fires after each completed model<->tool cycle, when the
+        history is whole again -- the CLI saves the session there, so a
+        crash on step forty doesn't take the first thirty-nine with it.
         """
         max_steps = max_steps or self.cfg.max_tool_steps
         self.cut_off = False
@@ -594,15 +720,8 @@ class Agent:
             )
             if handler.input_tokens:
                 self.last_input_tokens = handler.input_tokens
-            self.total_output_tokens += handler.output_tokens
-            cache_read = handler.cache_read_tokens
-            cache_write = handler.cache_write_tokens
-            self.total_cache_read_tokens += cache_read
-            self.total_cache_write_tokens += cache_write
-            # input_tokens is the whole context; the cached parts are priced
-            # differently, so what's left is what was billed as fresh input.
-            self.total_fresh_input_tokens += max(
-                0, handler.input_tokens - cache_read - cache_write)
+                self._measured_upto = len(self.messages)
+            self._count_usage(handler)
 
             truncated = handler.stop_reason == "max_tokens"
             if not handler.content:
@@ -653,6 +772,8 @@ class Agent:
                 self.messages.append({"role": "user", "content": tool_results})
                 raise
             self.messages.append({"role": "user", "content": tool_results})
+            if on_step:
+                on_step()
 
         # Hit the ceiling. Nothing is written into the history: a line put
         # there under the user's name is a message they never sent, and it

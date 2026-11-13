@@ -148,6 +148,35 @@ def sse_events(*events):
 START = ("message_start", {"message": {"usage": {"input_tokens": 5}}})
 
 
+class TestSavedEveryStep(TurnCase):
+    def test_on_step_fires_once_the_results_are_in(self):
+        """The CLI saves there, so the history it writes must be whole."""
+        a = self.make_agent(reply(tool("t1", path="x")), reply(tool("t2", path="y")),
+                            reply(text("done")))
+        seen = []
+        with mock.patch.object(agent_mod, "run_tool", return_value=("ok", False)):
+            a.run_turn(on_text=lambda s: None,
+                       on_step=lambda: seen.append((len(a.messages), paired(a.messages))))
+        self.assertEqual(seen, [(3, True), (5, True)])
+
+
+class TestOpenAIStreamCompleteness(unittest.TestCase):
+    def stream(self, *chunks):
+        from lindwyrm import openai_client
+        with mock.patch("lindwyrm.openai_client.stream_sse",
+                        return_value=iter((None, c) for c in chunks)):
+            return openai_client.stream_message(make_config(), [], "", [])
+
+    def test_a_stream_without_a_finish_reason_is_an_error(self):
+        with self.assertRaises(APIError):
+            self.stream({"choices": [{"delta": {"content": "Half an answ"}}]})
+
+    def test_a_finished_stream_is_kept(self):
+        h = self.stream({"choices": [{"delta": {"content": "All of it"}}]},
+                        {"choices": [{"delta": {}, "finish_reason": "stop"}]})
+        self.assertEqual(h.content, [{"type": "text", "text": "All of it"}])
+
+
 class TestStreamCompleteness(unittest.TestCase):
     def test_a_stream_cut_before_message_stop_is_an_error(self):
         events = [START,

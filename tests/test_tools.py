@@ -333,7 +333,30 @@ class TestBashStreaming(ToolTestCase):
         out = tool_bash(self.cfg,
                         f"python3 -c \"print('x' * {MAX_BASH_OUTPUT * 2})\"")
         self.assertLess(len(out), MAX_BASH_OUTPUT + 200)
-        self.assertIn("output truncated", out)
+        self.assertIn("cut from the middle", out)
+
+    def test_a_bounded_output_keeps_its_end(self):
+        """The end is where a command says how it went."""
+        from lindwyrm.tools import MAX_BASH_OUTPUT
+        out = tool_bash(
+            self.cfg,
+            f"python3 -c \"print('x' * {MAX_BASH_OUTPUT * 2}); print('FAILED 3 tests')\"")
+        self.assertTrue(out.endswith("FAILED 3 tests"))
+
+    def test_a_timeout_reports_what_was_printed_first(self):
+        """Without it the model can't tell where the command hung."""
+        with self.assertRaises(SandboxError) as ctx:
+            tool_bash(self.cfg, "echo running test_parser; sleep 30", timeout=1)
+        self.assertIn("timed out", str(ctx.exception))
+        self.assertIn("running test_parser", str(ctx.exception))
+
+    def test_a_timeout_report_is_bounded(self):
+        from lindwyrm.tools import TIMEOUT_OUTPUT_CHARS
+        with self.assertRaises(SandboxError) as ctx:
+            tool_bash(self.cfg, "python3 -c \"print('x' * 200000, flush=True)\"; "
+                                "echo LAST; sleep 30", timeout=2)
+        self.assertLess(len(str(ctx.exception)), TIMEOUT_OUTPUT_CHARS + 200)
+        self.assertTrue(str(ctx.exception).endswith("LAST"))
 
     def test_no_output_is_reported_as_such(self):
         self.assertIn("(no output)", tool_bash(self.cfg, "true"))
@@ -457,6 +480,54 @@ class TestReadFile(ToolTestCase):
         with self.assertRaises(SandboxError) as ctx:
             tool_read_file(self.cfg, "big.txt")
         self.assertIn("start_line", str(ctx.exception))
+
+
+class TestEmptyOldText(ToolTestCase):
+    def test_an_empty_old_text_is_refused(self):
+        """"" matches between every two characters; with replace_all it
+        threaded new_text through the whole file."""
+        from lindwyrm.tools import tool_edit_file
+        f = self.write("a.txt", "abc")
+        for replace_all in (False, True):
+            with self.assertRaises(SandboxError):
+                tool_edit_file(self.cfg, "a.txt", "", "-", replace_all=replace_all)
+        self.assertEqual(f.read_text(), "abc")
+
+
+class TestGrepWalk(ToolTestCase):
+    def test_skipped_directories_are_never_entered(self):
+        from unittest import mock
+        from lindwyrm import tools
+        self.write("src/a.py", "needle\n")
+        self.write("node_modules/pkg/b.js", "needle\n")
+        opened = []
+        real = tools._looks_binary
+        with mock.patch.object(tools, "_looks_binary",
+                               side_effect=lambda p: opened.append(p.name) or real(p)):
+            out = tools.tool_grep(self.cfg, "needle")
+        self.assertEqual(out, "src/a.py:1: needle")
+        self.assertEqual(opened, ["a.py"])
+        self.assertNotIn("b.js", [p.name for p in tools._walk_files(self.root)])
+
+    def test_a_name_filter_still_applies(self):
+        from lindwyrm.tools import tool_grep
+        self.write("src/a.py", "needle\n")
+        self.write("src/a.txt", "needle\n")
+        self.assertEqual(tool_grep(self.cfg, "needle", glob="*.py"), "src/a.py:1: needle")
+
+    def test_a_path_pattern_still_applies(self):
+        from lindwyrm.tools import tool_grep
+        self.write("src/deep/a.py", "needle\n")
+        self.write("docs/a.py", "needle\n")
+        self.assertEqual(tool_grep(self.cfg, "needle", glob="src/**/*.py"),
+                         "src/deep/a.py:1: needle")
+
+    def test_results_come_in_a_stable_order(self):
+        from lindwyrm.tools import tool_grep
+        for name in ("c.py", "a.py", "b.py"):
+            self.write(name, "needle\n")
+        self.assertEqual(tool_grep(self.cfg, "needle").splitlines(),
+                         ["a.py:1: needle", "b.py:1: needle", "c.py:1: needle"])
 
 
 if __name__ == "__main__":

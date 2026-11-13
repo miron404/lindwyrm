@@ -511,6 +511,7 @@ def _do_turn(cfg: Config, agent: Agent, renderer: Renderer) -> int:
             on_tool_output=make_tool_output_printer(renderer),
             on_retry=_make_retry_printer(),
             on_notice=lambda msg: print(f"  {DIM}{msg}{RESET}"),
+            on_step=lambda: _persist(cfg, agent),
         )
         renderer.end_turn()
         if not finished:
@@ -628,6 +629,9 @@ def _handle_command(line: str, cfg: Config, agent: Agent, renderer: Renderer) ->
         if cfg.save_sessions:
             agent.session_id = new_session_id()
             agent.session_created = time.time()
+            # Its own offload directory too. Left on the old one, the new
+            # session's results would be swept away with the old session.
+            offload.set_store(offload.OffloadStore(session_id=agent.session_id))
         print("history cleared (new session started)")
     else:
         print(f"unknown command: {cmd} (try /help)")

@@ -280,9 +280,12 @@ A protected zone of recent conversation, measured in tokens rather than
 messages: four messages might be forty tokens or half the window, depending
 on whether a test run landed in them.
 
-History is also only ever cut at the boundary of one of your turns. A tool
-call and its result cannot be separated — the APIs reject a history where
-they are.
+History is cut at the boundary of one of your turns where it can be. When a
+single turn has itself grown into most of the context — one request, dozens
+of tool steps — the cut moves inside it, to just before one of the model's
+steps, and your request is carried over word for word behind the summary. A
+tool call and its result are never separated either way — the APIs reject a
+history where they are.
 
 ### Settings
 
@@ -294,7 +297,7 @@ they are.
 | `auto_compact` | `true` | master switch for automatic reclaiming |
 | `compact_threshold` | `0.75` | share of the window that triggers it |
 | `compact_max_tokens` | `200000` | absolute ceiling; `0` disables, leaving only the share |
-| `compact_keep_tokens` | `8000` | size of the protected zone, capped at a quarter of the window |
+| `compact_keep_tokens` | `0` | size of the protected zone; `0` is auto, an eighth of the point where reclaiming starts (25,000 for a 200K trigger). Capped at a quarter of the window |
 | `compact_keep_last` | `4` | messages always kept, however large they are |
 
 `offload_eager_tokens` defaults to a thirty-second of the context window,
@@ -526,8 +529,8 @@ max_retries = 4     # retries on 429/5xx and connection errors
   symlinks and `../` before matching. They are not a defense against a write
   you confirm yourself.
 - Summarizing is lossy by nature: it replaces older turns with a model-written
-  summary, cutting only at user-turn boundaries so tool calls are never split
-  from their results. Offloading, which runs first, loses nothing — the full
+  summary, cutting only where tool calls are never split from their
+  results. Offloading, which runs first, loses nothing — the full
   text stays under `~/.local/share/lindwyrm/offload/` (`0600` files in
   `0700` directories) for as long as its session is saved; without one —
   `--no-save`, or a crash — it is removed at exit or swept after 7 days. An offloaded result is a *snapshot*, which is exactly why it is copied

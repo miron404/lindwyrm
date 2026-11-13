@@ -289,5 +289,11 @@ def stream_message(
         if think_out and on_thinking:
             on_thinking(think_out)
 
+    if handler.stop_reason is None:
+        # No finish_reason ever arrived, so the stream stopped part-way.
+        # Same rule as the Anthropic client: half an answer is not stored
+        # as if it were a whole one.
+        raise APIError("the response stream ended before the reply was "
+                       "complete (connection cut?); nothing from it was kept")
     handler.finalize()
     return handler

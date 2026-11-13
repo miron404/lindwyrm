@@ -33,6 +33,7 @@ from pathlib import Path
 CHARS_PER_TOKEN = 4  # rough, and only used for "is this big enough to bother"
 PREVIEW_LINES = 8
 PREVIEW_CHARS = 400  # a minified file is one enormous line; cap by size too
+TAIL_LINES = 8
 SESSION_RETENTION_DAYS = 7
 
 DEFAULT_ROOT = Path(os.path.expanduser("~/.local/share/lindwyrm/offload"))
@@ -117,20 +118,33 @@ class OffloadStore:
 
     # -- the text left behind in the conversation ---------------------------
 
-    def stub(self, entry: OffloadEntry, text: str) -> str:
-        preview = "\n".join(text.splitlines()[:PREVIEW_LINES])
+    def stub(self, entry: OffloadEntry, text: str, *, tail: bool = False) -> str:
+        """`tail` also quotes the last lines, for output whose point is at
+        the end: a build log's first eight lines say what started, not
+        whether it failed."""
+        lines = text.splitlines()
+        preview = "\n".join(lines[:PREVIEW_LINES])
         if len(preview) > PREVIEW_CHARS:
             # One 4000-character line counts as a single "line", so a
             # line-only limit can quote the whole result back and make the
             # stub larger than what it replaces.
             preview = preview[:PREVIEW_CHARS] + " …"
         hidden = max(0, entry.lines - PREVIEW_LINES)
+        ending = ""
+        last = lines[PREVIEW_LINES:][-TAIL_LINES:] if tail else []
+        if last:
+            hidden = max(0, hidden - len(last))
+            shown = "\n".join(last)
+            if len(shown) > PREVIEW_CHARS:
+                shown = "… " + shown[-PREVIEW_CHARS:]
+            ending = f"Last {len(last)} line(s):\n{shown}\n"
         size_kb = entry.chars / 1024
         return (
             f"[offloaded: {entry.label} -- {entry.lines} lines, {size_kb:.1f} KB, "
             f"ref {entry.ref}]\n"
             f"{preview}\n"
             f"... {hidden} more line(s) not shown.\n"
+            f"{ending}"
             f"This is a snapshot from when the tool ran; the file or command "
             f"output may differ now. Use read_offloaded(\"{entry.ref}\") for the "
             f"full snapshot, or read_file for the file's current contents."

@@ -104,9 +104,14 @@ Each of these has already cost someone an afternoon:
   Unless the project is in the user's `trusted_projects`, keys in
   `USER_ONLY_KEYS` are dropped and `[policy]` may only tighten. A new setting
   that can send data somewhere or loosen a confirmation belongs in that set.
-- **History may only be cut at a user-turn boundary.** Cutting elsewhere
-  orphans a `tool_result` from its `tool_use` and both APIs reject it. See
-  `is_turn_boundary`.
+- **History may only be cut at a user-turn boundary, or just before an
+  assistant message.** Anywhere else orphans a `tool_result` from its
+  `tool_use` and both APIs reject it. The turn boundary is preferred
+  (`is_turn_boundary`); the mid-turn cut exists because one long turn has no
+  boundary but index 0 and could otherwise never be compacted. After a
+  mid-turn cut the summary stands alone, with the turn's request quoted
+  verbatim behind it -- no synthetic assistant reply, or two assistant
+  messages would meet.
 - **The system prompt and tool schemas are the cacheable prefix.** Keep them
   stable and keep history append-only. Never put volatile data (timestamps,
   git state) at the front of the system prompt — it invalidates the cache on

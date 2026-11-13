@@ -101,6 +101,56 @@ class TestStub(StoreTestCase):
         self.assertIn("read_file", self.stub)
 
 
+class TestStubTail(StoreTestCase):
+    """A command's verdict is at the bottom of its output."""
+
+    def setUp(self):
+        super().setUp()
+        self.text = "\n".join(f"line {i}" for i in range(200)) + "\nFAILED (errors=3)"
+        self.entry = self.store.put(self.text, "bash make test")
+
+    def test_tail_quotes_the_end(self):
+        stub = self.store.stub(self.entry, self.text, tail=True)
+        self.assertIn("line 0", stub)
+        self.assertIn("FAILED (errors=3)", stub)
+        self.assertIn(f"{201 - 16} more line(s) not shown", stub)
+
+    def test_without_tail_the_end_is_left_out(self):
+        self.assertNotIn("FAILED", self.store.stub(self.entry, self.text))
+
+    def test_a_short_result_is_not_quoted_twice(self):
+        text = "\n".join(f"row {i}" for i in range(10))
+        entry = self.store.put(text, "bash ls")
+        stub = self.store.stub(entry, text, tail=True)
+        self.assertEqual(stub.count("row 9"), 1)
+        self.assertEqual(stub.count("row 7"), 1)
+        self.assertIn("0 more line(s) not shown", stub)
+
+    def test_one_enormous_last_line_is_capped(self):
+        text = "\n".join(f"row {i}" for i in range(20)) + "\n" + "z" * 50_000
+        entry = self.store.put(text, "bash cat min.js")
+        self.assertLess(len(self.store.stub(entry, text, tail=True)), 1500)
+
+    def test_the_agent_asks_for_a_tail_on_command_output_only(self):
+        agent = Agent(make_config(offload=True))
+        self.assertIn("FAILED", agent._offload_result_labelled("bash make test", self.text))
+        self.assertNotIn("FAILED", agent._offload_result_labelled("read_file log.txt", self.text))
+
+
+class TestClearStartsANewStore(StoreTestCase):
+    def test_clear_moves_offloads_to_the_new_session(self):
+        """Left on the old session's directory, the new session's results
+        were swept away when the old session was retired."""
+        from lindwyrm import cli
+        agent = Agent(make_config(save_sessions=True))
+        agent.session_id = "old-session"
+        with mock.patch.object(offload, "DEFAULT_ROOT", Path(self._tmp.name)), \
+                mock.patch("builtins.print"):
+            cli._handle_command("/clear", agent.cfg, agent, None)
+        self.assertNotEqual(agent.session_id, "old-session")
+        self.assertEqual(offload.get_store().root.name, agent.session_id)
+
+
 class TestReadOffloadedTool(StoreTestCase):
     def test_tool_returns_the_snapshot(self):
         entry = self.store.put("secret contents", "bash ls")
@@ -229,6 +279,24 @@ class TestProtectedZone(unittest.TestCase):
         compaction would never fire at all."""
         agent = Agent(make_config(context_limit=4_000, compact_keep_tokens=8_000))
         self.assertLessEqual(agent.keep_tokens(), 1_000)
+
+    def test_auto_zone_is_a_share_of_the_compaction_trigger(self):
+        """Not of the window: with a 1M window the trigger is the 200K
+        ceiling, and the zone has to follow that."""
+        for limit, expected in ((1_000_000, 25_000), (128_000, 12_000),
+                                (32_000, 3_000)):
+            agent = Agent(make_config(context_limit=limit, compact_keep_tokens=0,
+                                      compact_max_tokens=200_000))
+            self.assertEqual(agent.keep_tokens(), expected)
+
+    def test_auto_zone_has_a_floor_but_stays_under_the_window_cap(self):
+        agent = Agent(make_config(context_limit=6_000, compact_keep_tokens=0))
+        self.assertEqual(agent.keep_tokens(), 1_000)
+        agent = Agent(make_config(context_limit=2_000, compact_keep_tokens=0))
+        self.assertEqual(agent.keep_tokens(), 500)
+
+    def test_the_default_is_auto(self):
+        self.assertEqual(Config(api_key="k").compact_keep_tokens, 0)
 
     def test_configured_zone_is_used_when_it_fits(self):
         agent = Agent(make_config(context_limit=200_000, compact_keep_tokens=8_000))

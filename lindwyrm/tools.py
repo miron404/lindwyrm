@@ -55,6 +55,9 @@ MAX_GREP_BYTES = 8 * 1024 * 1024  # skip files too big to be worth searching
 # Ceiling on captured command output. Anything above the offload threshold is
 # moved to disk intact, so this only bounds the truly pathological case.
 MAX_BASH_OUTPUT = 400_000
+# How much of a timed-out command's output goes back to the model. An error
+# result is never offloaded, so this one has to be small on its own.
+TIMEOUT_OUTPUT_CHARS = 8_000
 
 DIFF_CONTEXT = 3      # unchanged lines shown around each hunk
 MAX_DIFF_LINES = 60   # a full-file rewrite shouldn't bury the prompt
@@ -103,6 +106,19 @@ SKIP_DIRS = frozenset({
     "dist", "build", "target", ".next", ".nuxt", ".output",
     ".idea", ".vscode", ".gradle", ".terraform", ".cache",
 })
+
+
+def _walk_files(base: Path):
+    """Every file under `base`, never descending into SKIP_DIRS.
+
+    rglob lists a skipped directory's whole contents first and leaves the
+    caller to throw them away -- node_modules alone can be a hundred thousand
+    stat calls for nothing. Sorted, so the same search gives the same order.
+    """
+    for root, dirs, names in os.walk(base):
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
+        for name in sorted(names):
+            yield Path(root) / name
 
 
 def _is_skipped(path: Path, base: Path) -> bool:
@@ -388,6 +404,13 @@ def tool_edit_file(cfg: Config, path: str, old_text: str, new_text: str,
     # Bytes, not text mode: universal newlines turned every \r\n into \n, so
     # a one-word edit rewrote the line endings of the entire file.
     original = resolved.read_bytes().decode("utf-8")
+    if not old_text:
+        # "" is found between every two characters: with replace_all it
+        # would thread new_text through the whole file.
+        raise SandboxError(
+            "old_text is empty. Give the exact text to replace; to add to a "
+            "file, include a neighbouring line in old_text and repeat it in "
+            "new_text.")
     if "\r\n" in original and original.count("\r\n") == original.count("\n"):
         # read_file shows lines without their \r, so the model writes \n.
         old_text, new_text = _to_crlf(old_text), _to_crlf(new_text)
@@ -494,8 +517,6 @@ def tool_glob(cfg: Config, pattern: str, path: str | None = None) -> str:
 
 
 def tool_grep(cfg: Config, pattern: str, path: str | None = None, glob: str | None = None) -> str:
-    import re
-
     raw = path or str(cfg.project_root)
     base = authorize(cfg, "read", raw, f"grep {pattern!r} in {_reld(cfg, raw)}")
     try:
@@ -510,8 +531,13 @@ def tool_grep(cfg: Config, pattern: str, path: str | None = None, glob: str | No
         # it and goes looking somewhere else.
         files = [base]
         base = base.parent
+    elif glob and "/" in glob:
+        # A path pattern ("src/**/*.py"): pathlib's matching is the meaning
+        # the model has in mind, and fnmatch on a name can't express it.
+        files = base.rglob(glob)
     else:
-        files = base.rglob(glob) if glob else base.rglob("*")
+        files = (f for f in _walk_files(base)
+                 if not glob or fnmatch.fnmatchcase(f.name, glob))
     for f in files:
         if not f.is_file() or _is_skipped(f, base):
             continue
@@ -693,9 +719,18 @@ def tool_bash(cfg: Config, command: str, timeout: int = 60,
     )
     try:
         out = _stream_output(proc, timeout, on_output)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
         _kill_process_tree(proc)
-        raise SandboxError(f"Command timed out after {timeout}s.")
+        # What it printed before the kill is the only clue to where it hung
+        # -- which test, which prompt, which download.
+        partial = (e.output or b"").decode("utf-8", errors="replace").strip()
+        if not partial:
+            raise SandboxError(f"Command timed out after {timeout}s, having "
+                               f"printed nothing.") from None
+        if len(partial) > TIMEOUT_OUTPUT_CHARS:
+            partial = "... " + partial[-TIMEOUT_OUTPUT_CHARS:]
+        raise SandboxError(f"Command timed out after {timeout}s. Output "
+                           f"before it was killed:\n{partial}") from None
     except KeyboardInterrupt:
         _kill_process_tree(proc)
         raise
@@ -706,7 +741,11 @@ def tool_bash(cfg: Config, command: str, timeout: int = 60,
         # earlier limit was low enough that a long build log was cut before
         # offloading -- which is lossless and would have kept all of it --
         # ever got a look at it. This is now a sanity bound, not a policy.
-        out = out[:MAX_BASH_OUTPUT] + "\n... (output truncated)"
+        # Both ends are kept: the start says what ran, the end how it went.
+        half = MAX_BASH_OUTPUT // 2
+        out = (out[:half]
+               + f"\n... ({len(out) - 2 * half} characters cut from the middle) ...\n"
+               + out[-half:])
     return f"exit code: {proc.returncode}\n{out}"
 
 
@@ -727,7 +766,8 @@ def _stream_output(proc: subprocess.Popen, timeout: int,
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise subprocess.TimeoutExpired(proc.args, timeout)
+            raise subprocess.TimeoutExpired(proc.args, timeout,
+                                            output=b"".join(collected))
 
         ready, _, _ = select.select([fd], [], [], min(0.2, remaining))
         if ready:

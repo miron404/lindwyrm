@@ -74,7 +74,15 @@ def _title_from(messages: list[dict]) -> str:
             if block.get("type") == "text":
                 text = " ".join(block.get("text", "").split())
                 if text.startswith("[Summary of earlier conversation"):
-                    continue  # a compaction artefact, not something they typed
+                    # A compaction artefact, not something they typed --
+                    # unless it carries the request of a turn that was cut
+                    # in the middle, which is.
+                    _, found, text = text.partition(
+                        "[The request this work is answering, in the user's own words:]")
+                    text = text.strip()
+                    if not found or not text:
+                        continue
+                    return text[:TITLE_CHARS]
                 if text:
                     return text[:TITLE_CHARS]
     return "(no prompt yet)"
