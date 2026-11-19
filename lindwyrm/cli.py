@@ -7,6 +7,7 @@ Usage:
     lwyrm --no-thinking        # disable thinking mode
     lwyrm --read-only          # never write/run, just answer
     lwyrm -p "fix the bug"     # one-shot: run a single prompt and exit
+    lwyrm config show          # show effective settings and their sources
 
 Presets bundle a provider + model + API key source. DeepSeek Flash/Pro
 ("flash"/"pro") ship built in; add your own via [[presets]] in
@@ -40,6 +41,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .agent import Agent
 from .config import (
@@ -729,6 +731,62 @@ def _list_presets(cfg: Config) -> None:
         print(f"  {name}{alias_s}: {preset.format}, {preset.model}{marker}")
 
 
+def _url_origin(url: str) -> str:
+    # Provider URLs and proxy URLs can carry credentials both in userinfo
+    # and in their path or query.
+    if not isinstance(url, str):
+        return "(unavailable)"
+    try:
+        parts = urlsplit(url)
+        if parts.scheme and parts.hostname:
+            host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+            port = f":{parts.port}" if parts.port is not None else ""
+            return f"{parts.scheme}://{host}{port}"
+    except ValueError:
+        pass
+    return "(unavailable)"
+
+
+def _print_config_report(cfg: Config) -> None:
+    report = cfg.report
+    assert report is not None
+    for label, path in (("Global", report.user_path), ("Project", report.project_path)):
+        status = "" if path.is_file() else " (missing)"
+        print(f"{label} config: {str(path)!r}{status}")
+    print(f"Project trust: {'trusted' if report.trusted else 'untrusted'}")
+    print()
+    print("Effective settings")
+    values = {
+        "preset_name": cfg.preset_name,
+        "model": cfg.model,
+        "format": cfg.format,
+        "base_url": _url_origin(cfg.base_url),
+        "proxy": (_url_origin(cfg.proxy) if cfg.proxy and cfg.proxy != "system"
+                  else cfg.proxy or "direct"),
+        "thinking": cfg.thinking,
+        "thinking_effort": cfg.thinking_effort,
+        "context_limit": cfg.context_limit,
+        "max_tokens": cfg.max_tokens,
+        "markdown": cfg.markdown,
+        "save_sessions": cfg.save_sessions,
+    }
+    for key in ("read", "write", "delete", "bash", "read_outside", "read_only"):
+        values[f"policy.{key}"] = getattr(cfg.policy, key)
+    labels = {"preset_name": "preset", "base_url": "base_url (origin)"}
+    for key, value in values.items():
+        display = str(value).lower() if isinstance(value, bool) else repr(value)
+        if value is None:
+            display = "(unset)"
+        print(f"  {labels.get(key, key):<18} {display} [{report.sources.get(key, 'built-in')}]")
+    if report.unknown_default_preset is not None:
+        print(f"\nUnknown default_preset {report.unknown_default_preset!r} "
+              f"[{report.sources['default_preset']}]; treated as a model ID at startup.")
+    if report.ignored:
+        print("\nIgnored settings from the untrusted project")
+        for setting in report.ignored:
+            print(f"  {setting!r}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="lwyrm", description="Minimal CLI coding agent for Anthropic- or OpenAI-compatible providers")
     p.add_argument("-m", "--model", help="preset name (flash | pro | your custom preset)")
@@ -749,11 +807,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--proxy", metavar="URL",
                    help="proxy for API traffic: socks5h://host:port, http://host:port, "
                         "'system' to use HTTP_PROXY/ALL_PROXY, or 'direct' to force none")
+    commands = p.add_subparsers(dest="command")
+    config = commands.add_parser("config", help="inspect configuration")
+    config_commands = config.add_subparsers(dest="config_command", required=True)
+    show = config_commands.add_parser("show", help="show effective settings and their sources")
+    show.add_argument("-C", "--dir", default=argparse.SUPPRESS,
+                      help="project root (default: cwd)")
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    show_config = getattr(args, "config_command", None) == "show"
+    if show_config and (args.init or args.prompt is not None or args.continue_ or args.resume is not None):
+        parser.error("config show cannot be combined with --init, --prompt, --continue, or --resume")
 
     thinking = None
     if args.no_thinking:
@@ -771,6 +839,7 @@ def main(argv: list[str] | None = None) -> int:
             # lock the template behind credentials the user may not have set
             # up yet -- which is exactly when a starter file is most useful.
             require_key=not args.init,
+            inspect=show_config,
         )
     except SystemExit as e:
         print(e, file=sys.stderr)
@@ -795,6 +864,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.no_save:
         cfg.save_sessions = False
+
+    if show_config:
+        if args.no_markdown:
+            cfg.report.sources["markdown"] = "--no-markdown"
+        if args.no_save:
+            cfg.report.sources["save_sessions"] = "--no-save"
+        if args.proxy is not None:
+            cfg.report.sources["proxy"] = "--proxy"
+        _print_config_report(cfg)
+        return 0
 
     try:
         if args.prompt:

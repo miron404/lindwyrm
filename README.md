@@ -75,6 +75,7 @@ lwyrm --read-only        # answer only; never write or run
 lwyrm --no-thinking      # turn reasoning off
 lwyrm --no-save          # leave no trace on disk
 lwyrm --init             # write a starter AGENTS.md and exit (no API key needed)
+lwyrm config show        # show effective settings and their sources
 ```
 
 `lwyrm --help` lists the rest.
@@ -451,6 +452,13 @@ backoff and jitter, honoring `Retry-After`. A request is only retried when
 nothing has been streamed yet — never mid-answer.
 
 ## Configuration
+
+Run `lwyrm config show` to see both config paths, the project's trust
+status, and where the effective preset, model, proxy, and basic policy
+settings come from. It lists settings ignored from an untrusted project
+and shows only the origin (scheme, host, and port) of provider and proxy
+URLs. It works without an API key or network access. Use
+`lwyrm -C ~/myproject config show` to inspect another project.
 
 Copy `lindwyrm.example.toml` to `./.lindwyrm.toml` (project) or
 `~/.config/lindwyrm/config.toml` (user). Project settings override user ones

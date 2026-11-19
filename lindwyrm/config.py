@@ -284,7 +284,7 @@ def _inherit(entry: dict, base: Preset | None, field):
     return _field_default(field)
 
 
-def preset_overrides(preset: Preset, cfg: "Config") -> dict:
+def preset_overrides(preset: Preset, cfg: "Config", *, resolve_key: bool = True) -> dict:
     """Every Config field a preset switch changes, as a plain dict.
 
     The single place that knows this mapping. `/model` applies it in place
@@ -294,7 +294,7 @@ def preset_overrides(preset: Preset, cfg: "Config") -> dict:
     values["extra_body"] = dict(preset.extra_body)
     values["preset_name"] = preset.name
     values["proxy"] = cfg.resolve_proxy(preset)
-    values["api_key"] = _resolve_preset_api_key(preset, cfg.global_key_file)
+    values["api_key"] = _resolve_preset_api_key(preset, cfg.global_key_file) if resolve_key else ""
     return values
 
 
@@ -478,6 +478,16 @@ class Policy:
 # ---------------------------------------------------------------------------
 
 @dataclass
+class ConfigReport:
+    user_path: Path
+    project_path: Path
+    trusted: bool
+    ignored: list[str]
+    sources: dict[str, str] = field(default_factory=dict)
+    unknown_default_preset: str | None = None
+
+
+@dataclass
 class Config:
     api_key: str
     base_url: str = DEFAULT_BASE_URL
@@ -580,8 +590,9 @@ class Config:
     # Extra hosts that always go direct. Loopback is exempt unconditionally
     # and is not listed here; this is for a model server on the LAN.
     no_proxy: tuple[str, ...] = ()
+    report: ConfigReport | None = field(default=None, repr=False, compare=False)
 
-    def with_preset(self, name: str) -> "Config":
+    def with_preset(self, name: str, *, resolve_key: bool = True) -> "Config":
         """Switch to a different preset by name/alias, re-resolving its API key.
 
         If `name` doesn't match any known preset, falls back to the old
@@ -592,7 +603,7 @@ class Config:
         preset = self.presets.get(key)
         if preset is None:
             return replace(self, model=name)
-        return replace(self, **preset_overrides(preset, self))
+        return replace(self, **preset_overrides(preset, self, resolve_key=resolve_key))
 
     def resolve_proxy(self, preset: Preset) -> str:
         """Effective proxy for `preset`: --proxy, else the preset's own
@@ -629,7 +640,7 @@ def _perm(field_name: str, raw) -> str:
 
 
 def _apply_policy(p: Policy, pol: dict, project_root: Path, *,
-                  tighten_only: bool = False) -> list[str]:
+                  tighten_only: bool = False, applied: set[str] | None = None) -> list[str]:
     """Layer one config file's [policy] table onto `p`.
 
     Layered rather than replaced: a project file that set a single level
@@ -649,6 +660,8 @@ def _apply_policy(p: Policy, pol: dict, project_root: Path, *,
             refused.append(f"policy.{fld} = {level!r} (looser than {current!r})")
             continue
         setattr(p, fld, level)
+        if applied is not None:
+            applied.add(fld)
 
     if "bash_allowlist" in pol:
         if tighten_only:
@@ -663,6 +676,8 @@ def _apply_policy(p: Policy, pol: dict, project_root: Path, *,
             refused.append("policy.read_only = false")
         else:
             p.read_only = wanted
+            if applied is not None:
+                applied.add("read_only")
 
     for entry in pol.get("rules", []):
         if "path" not in entry:
@@ -688,12 +703,6 @@ def _apply_policy(p: Policy, pol: dict, project_root: Path, *,
             p.set_rule(raw_path, **kwargs)
 
     return refused
-
-
-def _build_policy(data: dict, project_root: Path) -> Policy:
-    p = Policy(root=project_root)
-    _apply_policy(p, data.get("policy", {}), project_root)
-    return p
 
 
 # ---------------------------------------------------------------------------
@@ -792,6 +801,7 @@ def load_config(
     thinking: bool | None = None,
     read_only: bool | None = None,
     require_key: bool = True,
+    inspect: bool = False,
 ) -> Config:
     root = (project_root or Path.cwd()).resolve()
 
@@ -800,20 +810,20 @@ def load_config(
 
     user_data = _read_toml(user_cfg)
     proj_data = _read_toml(proj_cfg)
-    policy = _build_policy(user_data, root)
-    if is_trusted_project(root, user_data.get("trusted_projects")):
-        data = {**user_data, **proj_data}  # project overrides user
-        _apply_policy(policy, proj_data.get("policy", {}), root)
-    else:
-        accepted, refused = _untrusted_project_settings(proj_data, root)
-        data = {**user_data, **accepted}
-        refused += _apply_policy(policy, proj_data.get("policy", {}), root,
-                                 tighten_only=True)
-        if refused:
-            print(f"warning: {proj_cfg} belongs to a project not listed in "
-                  f"trusted_projects, so these settings in it were ignored: "
-                  f"{', '.join(refused)}. To apply them, add the project to "
-                  f"trusted_projects in {user_cfg}.", file=sys.stderr)
+    policy = Policy(root=root)
+    user_policy = set() if inspect else None
+    project_policy = set() if inspect else None
+    _apply_policy(policy, user_data.get("policy", {}), root, applied=user_policy)
+    trusted = is_trusted_project(root, user_data.get("trusted_projects"))
+    accepted, refused = (proj_data, []) if trusted else _untrusted_project_settings(proj_data, root)
+    data = {**user_data, **accepted}
+    refused += _apply_policy(policy, proj_data.get("policy", {}), root,
+                             tighten_only=not trusted, applied=project_policy)
+    if refused and not inspect:
+        print(f"warning: {proj_cfg} belongs to a project not listed in "
+              f"trusted_projects, so these settings in it were ignored: "
+              f"{', '.join(refused)}. To apply them, add the project to "
+              f"trusted_projects in {user_cfg}.", file=sys.stderr)
 
     presets = _build_presets(data)
     global_key_file = data.get("key_file")
@@ -825,14 +835,15 @@ def load_config(
 
     # Which preset to start on: default_preset (new), else legacy `model` key
     # (may be "flash"/"pro"/a preset name/a bare model id), else deepseek-flash.
-    start_name = data.get("default_preset") or data.get("model") or DEFAULT_PRESET
+    start_setting = "default_preset" if data.get("default_preset") else "model"
+    start_name = data.get(start_setting) or DEFAULT_PRESET
     start_key = PRESET_ALIASES.get(start_name, start_name)
     preset = presets.get(start_key)
     if preset is None:
         # Legacy: `model` was a raw DeepSeek model id, not a preset name.
         preset = replace(BUILTIN_PRESETS[DEFAULT_PRESET], model=start_name)
 
-    api_key = _resolve_preset_api_key(preset, global_key_file, require_key)
+    api_key = "" if inspect else _resolve_preset_api_key(preset, global_key_file, require_key)
 
     cfg = Config(
         api_key=api_key,
@@ -885,11 +896,48 @@ def load_config(
 
     # CLI overrides.
     if model is not None:
-        cfg = cfg.with_preset(model)
+        cfg = cfg.with_preset(model, resolve_key=not inspect)
     if thinking is not None:
         cfg.thinking = thinking
     if read_only is not None:
         cfg.policy.read_only = read_only
 
     cfg.max_tokens = min(cfg.max_tokens, MODEL_MAX_TOKENS_CEILING)
+
+    if inspect:
+        layers = dict.fromkeys(user_data, "global") | dict.fromkeys(accepted, "project")
+        cli_preset = presets.get(PRESET_ALIASES.get(model, model))
+        active = cli_preset or preset
+        preset_fields = set()
+        if cli_preset or start_key in presets:
+            for entry in data.get("presets", []):
+                if entry["name"] == active.name:
+                    preset_fields.update(entry)
+        preset_layer = layers.get("presets", "built-in")
+        sources = layers.copy()
+        # An explicit preset switch re-applies the preset's settings over
+        # legacy root-level overrides.
+        for key in preset_config_fields() if cli_preset else ("format", "model"):
+            sources.pop(key, None)
+        for key in preset_fields:
+            sources.setdefault(key, f"{preset_layer} preset")
+        sources["preset_name"] = "built-in"
+        if cli_preset:
+            sources["preset_name"] = "--model"
+        elif start_key in presets and data.get(start_setting):
+            sources["preset_name"] = f"{layers[start_setting]} {start_setting}"
+        elif start_key not in presets:
+            sources["model"] = f"{layers[start_setting]} {start_setting}"
+        if model is not None and not cli_preset:
+            sources["model"] = "--model"
+        if active.proxy is not None:
+            sources["proxy"] = f"{preset_layer} preset"
+        if thinking is not None:
+            sources["thinking"] = "--thinking" if thinking else "--no-thinking"
+        sources.update(dict.fromkeys((f"policy.{key}" for key in user_policy or ()), "global"))
+        sources.update(dict.fromkeys((f"policy.{key}" for key in project_policy or ()), "project"))
+        if read_only is not None:
+            sources["policy.read_only"] = "--read-only"
+        unknown = start_name if start_key not in presets and start_setting == "default_preset" else None
+        cfg.report = ConfigReport(user_cfg, proj_cfg, trusted, refused, sources, unknown)
     return cfg
