@@ -1,16 +1,23 @@
 """File tools: editing, searching, and the guards around them."""
 
 import os
+import select
+import signal
+import subprocess
+import sys
 import time
 import tempfile
 import unittest
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
 from lindwyrm.config import Policy
 from lindwyrm.sandbox import SandboxError
 from lindwyrm.tools import (
+    MAX_BASH_OUTPUT,
     MAX_DIFF_LINES,
+    _kill_process_tree,
     _looks_binary,
     _match_lines,
     _unified_diff,
@@ -329,7 +336,6 @@ class TestBashStreaming(ToolTestCase):
         self.assertNotIn("output truncated", out)
 
     def test_a_pathological_output_is_still_bounded(self):
-        from lindwyrm.tools import MAX_BASH_OUTPUT
         out = tool_bash(self.cfg,
                         f"python3 -c \"print('x' * {MAX_BASH_OUTPUT * 2})\"")
         self.assertLess(len(out), MAX_BASH_OUTPUT + 200)
@@ -337,11 +343,50 @@ class TestBashStreaming(ToolTestCase):
 
     def test_a_bounded_output_keeps_its_end(self):
         """The end is where a command says how it went."""
-        from lindwyrm.tools import MAX_BASH_OUTPUT
         out = tool_bash(
             self.cfg,
             f"python3 -c \"print('x' * {MAX_BASH_OUTPUT * 2}); print('FAILED 3 tests')\"")
         self.assertTrue(out.endswith("FAILED 3 tests"))
+
+    def test_a_long_line_is_streamed_in_bounded_pieces(self):
+        seen = []
+        out = tool_bash(
+            self.cfg, f"""python3 -c "print('я' * {MAX_BASH_OUTPUT + 1}, end='')" """,
+            on_output=seen.append)
+        self.assertGreater(len(seen), 1)
+        self.assertEqual("".join(seen), "я" * (MAX_BASH_OUTPUT + 1))
+        self.assertIn("(1 characters cut from the middle)", out)
+        self.assertTrue(out.endswith("я" * (MAX_BASH_OUTPUT // 2)))
+
+    def test_a_process_that_closes_its_output_can_still_time_out(self):
+        with self.assertRaisesRegex(SandboxError, "timed out"):
+            tool_bash(self.cfg, "exec >/dev/null 2>&1; exec sleep 30", timeout=1)
+
+    def test_group_cleanup_kills_a_child_that_ignores_term(self):
+        for leader_exited in (False, True):
+            with self.subTest(leader_exited=leader_exited):
+                proc = subprocess.Popen([sys.executable, "-c", f"""
+import os, signal
+if os.fork() == 0:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    print("ready", flush=True)
+    signal.pause()
+elif not {leader_exited!r}:
+    signal.pause()
+"""], stdout=subprocess.PIPE, start_new_session=True)
+                with proc.stdout as pipe:
+                    try:
+                        self.assertTrue(select.select([pipe], [], [], 3)[0])
+                        self.assertEqual(pipe.readline(), b"ready\n")
+                        if leader_exited:
+                            proc.wait(timeout=3)
+                        _kill_process_tree(proc)
+                        self.assertTrue(select.select([pipe], [], [], 2)[0])
+                        self.assertEqual(pipe.read(), b"")
+                    finally:
+                        with suppress(ProcessLookupError):
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        proc.wait(timeout=3)
 
     def test_a_timeout_reports_what_was_printed_first(self):
         """Without it the model can't tell where the command hung."""

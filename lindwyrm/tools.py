@@ -11,8 +11,10 @@ no matter how the model phrases its request.
 from __future__ import annotations
 
 import base64
+import codecs
 import difflib
 import fnmatch
+import io
 import os
 import re
 import select
@@ -623,20 +625,25 @@ def tool_view_image(cfg: Config, path: str) -> ImageResult:
 
 def _kill_process_tree(proc: subprocess.Popen) -> None:
     """SIGTERM the command's whole process group, SIGKILL what survives."""
+    # start_new_session makes the shell PID the group ID, even if the
+    # shell has already exited and there's no PID to look up anymore.
     try:
-        pgid = os.getpgid(proc.pid)
-    except (ProcessLookupError, OSError):
-        return
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.killpg(pgid, sig)
-        except (ProcessLookupError, PermissionError, OSError):
-            return
-        try:
-            proc.wait(timeout=2)
-            return
-        except subprocess.TimeoutExpired:
-            continue
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        pass
+    # Waiting only reaps the shell. Children can still be running.
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 # Characters that chain, substitute or redirect. An allowlisted prefix says
@@ -723,7 +730,7 @@ def tool_bash(cfg: Config, command: str, timeout: int = 60,
         _kill_process_tree(proc)
         # What it printed before the kill is the only clue to where it hung
         # -- which test, which prompt, which download.
-        partial = (e.output or b"").decode("utf-8", errors="replace").strip()
+        partial = (e.output or "").strip()
         if not partial:
             raise SandboxError(f"Command timed out after {timeout}s, having "
                                f"printed nothing.") from None
@@ -731,21 +738,13 @@ def tool_bash(cfg: Config, command: str, timeout: int = 60,
             partial = "... " + partial[-TIMEOUT_OUTPUT_CHARS:]
         raise SandboxError(f"Command timed out after {timeout}s. Output "
                            f"before it was killed:\n{partial}") from None
-    except KeyboardInterrupt:
+    except BaseException:
         _kill_process_tree(proc)
         raise
+    finally:
+        proc.stdout.close()
 
     out = out.strip() or "(no output)"
-    if len(out) > MAX_BASH_OUTPUT:
-        # Truncation here is a last resort and loses data for good. The
-        # earlier limit was low enough that a long build log was cut before
-        # offloading -- which is lossless and would have kept all of it --
-        # ever got a look at it. This is now a sanity bound, not a policy.
-        # Both ends are kept: the start says what ran, the end how it went.
-        half = MAX_BASH_OUTPUT // 2
-        out = (out[:half]
-               + f"\n... ({len(out) - 2 * half} characters cut from the middle) ...\n"
-               + out[-half:])
     return f"exit code: {proc.returncode}\n{out}"
 
 
@@ -758,43 +757,65 @@ def _stream_output(proc: subprocess.Popen, timeout: int,
     line reach the screen while the command is still going, and keeps the
     timeout honest -- a blocking readline would sail straight past it.
     """
-    collected: list[bytes] = []
-    pending = b""
+    half = MAX_BASH_OUTPUT // 2
+    captured = io.StringIO()
+    head = ""
+    dropped = 0
+    pending = ""
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     deadline = time.monotonic() + timeout
     fd = proc.stdout.fileno()
 
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise subprocess.TimeoutExpired(proc.args, timeout,
-                                            output=b"".join(collected))
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(proc.args, timeout)
+            ready, _, _ = select.select([fd], [], [], min(0.2, remaining))
+            if not ready and proc.poll() is None:
+                continue
+            # A deliberately backgrounded command may keep the pipe open
+            # after the shell exits. Let the shell return once output stops.
+            data = os.read(fd, 65536) if ready else b""
+            chunk = decoder.decode(data, final=not data)
+            captured.write(chunk)
+            if captured.tell() > MAX_BASH_OUTPUT:
+                # Keep the start once and roll the tail forward in bulk.
+                # Rotating only here avoids copying the tail on every read.
+                block = captured.getvalue()
+                if not head:
+                    head = block[:half]
+                    dropped = len(block) - MAX_BASH_OUTPUT
+                else:
+                    dropped += len(block) - half
+                captured = io.StringIO()
+                captured.write(block[-half:])
 
-        ready, _, _ = select.select([fd], [], [], min(0.2, remaining))
-        if ready:
-            data = os.read(fd, 65536)
-            if not data:
-                break  # EOF: the command closed its output
-            collected.append(data)
             if on_output is not None:
-                pending += data
-                while b"\n" in pending:
-                    line, pending = pending.split(b"\n", 1)
-                    on_output(line.decode("utf-8", errors="replace"))
-        elif proc.poll() is not None:
-            break  # exited with nothing left to read
+                lines = (pending + chunk).split("\n")
+                pending = lines.pop()
+                for line in lines:
+                    on_output(line)
+                # A tool can keep writing without ever ending the line.
+                if len(pending) >= 65536:
+                    on_output(pending)
+                    pending = ""
+            if not data:
+                break
 
-    if on_output is not None and pending.strip():
-        on_output(pending.decode("utf-8", errors="replace"))
-
-    try:
-        proc.wait(timeout=max(1, int(deadline - time.monotonic())))
+        if on_output is not None and pending.strip():
+            on_output(pending)
+        proc.wait(timeout=max(0, deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
-        _kill_process_tree(proc)
-    try:
-        proc.stdout.close()
-    except OSError:
-        pass
-    return b"".join(collected).decode("utf-8", errors="replace")
+        partial = captured.getvalue()
+        raise subprocess.TimeoutExpired(proc.args, timeout, output=partial) from None
+
+    tail = captured.getvalue()
+    if head:
+        dropped += len(tail) - half
+        return (f"{head}\n... ({dropped} characters cut from the middle) ...\n"
+                f"{tail[-half:]}")
+    return tail
 
 
 # Dispatch table.
@@ -820,8 +841,8 @@ def run_tool(cfg: Config, name: str, tool_input: dict,
              on_output=None) -> tuple[str, bool]:
     """Run a tool by name. Returns (result_text, is_error).
 
-    `on_output` receives lines from long-running tools as they appear; the
-    model still gets the complete output in the result either way.
+    `on_output` receives lines from long-running tools as they appear.
+    Captured output is limited independently of this callback.
     """
     func = TOOL_FUNCS.get(name)
     if func is None:

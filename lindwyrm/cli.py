@@ -56,7 +56,7 @@ from . import offload
 from .offload import get_store
 from .project import CONTEXT_FILENAMES, TEMPLATE, find_context_file
 from .render import Renderer, _esc, _HAS_RICH
-from .sandbox import UserQuit, reset_session_grants
+from .sandbox import UserQuit, reset_session_grants, terminal_input
 from .session import (
     describe_age,
     latest_session_id,
@@ -97,8 +97,7 @@ EXIT_ERROR = 1
 EXIT_INCOMPLETE = 3    # step ceiling, or the reply was cut off by max_tokens
 EXIT_INTERRUPTED = 130  # the shell convention for SIGINT
 
-# How many lines of bash command output to echo to the terminal. The model
-# always receives the full output; this only limits what you see.
+# How many lines of bash command output to echo to the terminal.
 BASH_OUTPUT_LINES = 25
 
 
@@ -289,8 +288,7 @@ def _emit(text: str = "") -> None:
 def make_tool_output_printer(renderer: Renderer):
     """Prints a long-running tool's output as it arrives.
 
-    Capped: a chatty build shouldn't scroll the session away. The model still
-    receives everything -- this only bounds what reaches the screen.
+    Capped: a chatty build shouldn't scroll the session away.
     """
     state = {"lines": 0}
 
@@ -298,8 +296,7 @@ def make_tool_output_printer(renderer: Renderer):
         state["lines"] += 1
         if state["lines"] > BASH_OUTPUT_LINES:
             if state["lines"] == BASH_OUTPUT_LINES + 1:
-                print(f"  {DIM}… still running; further output hidden "
-                      f"(the model still receives all of it){RESET}")
+                print(f"  {DIM}… still running; further output hidden{RESET}")
             return
         if renderer.enabled and renderer.console is not None:
             renderer.console.print(f"  [dim]│[/dim] {_esc(line)}")
@@ -876,14 +873,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        if args.prompt:
-            agent = _make_agent(cfg, args)
-            agent.add_user(args.prompt)
-            renderer = Renderer(thinking_mode=cfg.thinking_display, enabled=cfg.markdown)
-            return _do_turn(cfg, agent, renderer)
+        with terminal_input():
+            if args.prompt:
+                agent = _make_agent(cfg, args)
+                agent.add_user(args.prompt)
+                renderer = Renderer(thinking_mode=cfg.thinking_display, enabled=cfg.markdown)
+                return _do_turn(cfg, agent, renderer)
 
-        run_repl(cfg, args)
-        return 0
+            run_repl(cfg, args)
+            return 0
     finally:
         close_client()  # release the pooled connection
         if not cfg.save_sessions:

@@ -1,7 +1,13 @@
 """Path resolution: rules must not be dodgeable via `..` or a symlink."""
 
 import os
+import pty
+import select
+import subprocess
+import sys
 import tempfile
+import termios
+import time
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
@@ -98,6 +104,49 @@ class TestAuthorize(unittest.TestCase):
         cfg = FakeConfig(self.root, policy)
         with self.assertRaises(SandboxError):
             authorize(cfg, "read", f"../{outside.name}/x.txt", "via ..")
+
+
+class TestConfirmationInput(unittest.TestCase):
+    def test_queued_keys_cannot_answer_or_freeze_the_next_prompt(self):
+        master, slave = pty.openpty()
+        gate_read, gate_write = os.pipe()
+        for fd in (master, slave, gate_read, gate_write):
+            self.addCleanup(os.close, fd)
+        attrs = termios.tcgetattr(slave)
+        attrs[0] |= termios.IXON
+        termios.tcsetattr(slave, termios.TCSANOW, attrs)
+        with subprocess.Popen([sys.executable, "-u", "-c", f"""
+import os
+import readline
+from lindwyrm.sandbox import _ask, terminal_input
+with terminal_input():
+    print("accepted:", _ask("First? "))
+    os.read({gate_read}, 1)
+    print("accepted:", _ask("Second? "))
+"""], stdin=slave, stdout=slave, stderr=slave, pass_fds=(gate_read,)) as child:
+            def expect(expected):
+                output = b""
+                deadline = time.monotonic() + 3
+                while expected not in output:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not select.select([master], [], [], remaining)[0]:
+                        self.fail(f"Expected {expected!r}, got {output!r}")
+                    output += os.read(master, 65536)
+
+            try:
+                expect(b"First? ")
+                os.write(master, b"a\r")
+                expect(b"accepted: a")
+                os.write(master, b"a\ra\x13")
+                os.write(gate_write, b"x")
+                expect(b"Second? ")
+                os.write(master, b"y\r")
+                expect(b"accepted: y")
+                self.assertEqual(child.wait(timeout=3), 0)
+                self.assertTrue(termios.tcgetattr(slave)[0] & termios.IXON)
+            finally:
+                if child.poll() is None:
+                    child.kill()
 
 
 if __name__ == "__main__":

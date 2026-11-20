@@ -13,6 +13,9 @@ bash is handled separately in tools.py since it isn't path-bound.
 from __future__ import annotations
 
 import os
+import sys
+import termios
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -97,11 +100,44 @@ def _colorize_preview(line: str) -> str:
 
 
 def _ask(prompt: str) -> str:
+    if sys.stdin.isatty():
+        try:
+            # Keystrokes typed while the model or a command was busy are
+            # still queued in the terminal. They must not answer this prompt.
+            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+        except (OSError, termios.error):
+            pass
     try:
         return input(prompt).strip().lower()
-    except (EOFError, KeyboardInterrupt):
+    except EOFError:
         print()
         return "n"
+
+
+@contextmanager
+def terminal_input():
+    """Keep Ctrl+S from freezing output during the interactive session."""
+    fd = None
+    try:
+        if sys.stdin.isatty():
+            candidate = sys.stdin.fileno()
+            attrs = termios.tcgetattr(candidate)
+            if attrs[0] & termios.IXON:
+                attrs[0] &= ~termios.IXON
+                termios.tcsetattr(candidate, termios.TCSANOW, attrs)
+                fd = candidate
+    except (OSError, termios.error):
+        pass
+    try:
+        yield
+    finally:
+        if fd is not None:
+            try:
+                attrs = termios.tcgetattr(fd)
+                attrs[0] |= termios.IXON
+                termios.tcsetattr(fd, termios.TCSANOW, attrs)
+            except (OSError, termios.error):
+                pass
 
 
 def authorize(
